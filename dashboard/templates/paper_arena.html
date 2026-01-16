@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradePro | Paper Arena</title>
+
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --accent:#ffd700; --border:#30363d; --text:#c9d1d9; --muted:#8b949e; --ok:#2ea043; --bad:#da3633; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin:0; padding:20px; }
+    .container { max-width: 1400px; margin: 0 auto; }
+
+    .header { display:flex; justify-content:space-between; align-items:center; margin-bottom:25px; border-bottom:1px solid var(--border); padding-bottom:15px; }
+    .header h1 { margin:0; color: var(--accent); font-size:1.6rem; display:flex; align-items:center; gap:10px; }
+    .nav-group { display:flex; gap:10px; flex-wrap:wrap; }
+    .btn { padding:8px 16px; text-decoration:none; border-radius:6px; font-weight:bold; font-size:0.85rem; display:inline-flex; align-items:center; gap:8px; border:none; cursor:pointer; transition:0.3s; }
+    .btn:hover { opacity:0.85; transform: translateY(-2px); }
+    .btn-back { background:#333; color:#fff; }
+    .btn-analytics { background: var(--accent); color:#000; }
+    .btn-audit { background:#58a6ff; color:#000; }
+
+    .panel { background: var(--panel); padding: 15px; border-radius: 12px; border: 1px solid var(--border); }
+    .panel h3 { margin: 0 0 12px 0; font-size: 0.95rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+
+    .controls { display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin-bottom: 12px; }
+    .input-group { display:flex; flex-direction:column; gap:8px; min-width: 160px; }
+    .input-group label { font-size: 0.75rem; color: var(--muted); font-weight:bold; text-transform:uppercase; }
+    .dark-input { background:#0d1117; color:#f0f6fc; border:1px solid var(--border); padding:10px 12px; border-radius:6px; outline:none; font-size:0.85rem; }
+    .btn-run { background: var(--accent); color:#000; border:none; padding: 10px 16px; border-radius:6px; font-weight:bold; cursor:pointer; transition:0.3s; }
+    .btn-run:hover { background:#fff; transform: translateY(-2px); }
+
+    .grid { display:grid; grid-template-columns: 1fr; gap: 16px; }
+    .two-col { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 980px){ .two-col{ grid-template-columns:1fr; } }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align:left; color: var(--muted); padding: 12px; border-bottom: 2px solid var(--border); text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.6px; }
+    td { padding: 12px; border-bottom: 1px solid #21262d; vertical-align: top; }
+    .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; border: 1px solid var(--border); background: #0d1117; color: var(--muted); }
+    .pill.ok { border-color: rgba(46,160,67,0.5); color: #7ee787; }
+    .pill.bad { border-color: rgba(218,54,51,0.5); color: #ff7b72; }
+
+    .action-btn { padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: #0d1117; color: var(--text); cursor:pointer; font-weight:700; }
+    .action-btn:hover { border-color: #fff; }
+    .action-approve { border-color: rgba(46,160,67,0.6); }
+    .action-reject { border-color: rgba(218,54,51,0.6); }
+
+    .status-line { margin-top: 6px; color: var(--muted); font-size: 0.85rem; }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <h1><i class="fa-solid fa-trophy"></i> Paper Arena</h1>
+      <div class="nav-group">
+        <a href="/analytics" class="btn btn-analytics"><i class="fa-solid fa-chart-line"></i> Analytics</a>
+        <a href="/audit" class="btn btn-audit"><i class="fa-solid fa-microscope"></i> Audit Lab</a>
+        <a href="/" class="btn btn-back"><i class="fa-solid fa-arrow-left"></i> Dashboard</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h3><i class="fa-solid fa-sliders"></i> Controls</h3>
+
+        <div class="controls">
+          <div class="input-group">
+            <label>Days</label>
+            <select id="paper-days" class="dark-input">
+              <option value="3">3</option>
+              <option value="7" selected>7</option>
+              <option value="14">14</option>
+              <option value="30">30</option>
+            </select>
+          </div>
+
+          <div class="input-group">
+            <label>Market</label>
+            <select id="paper-market" class="dark-input">
+              <option value="futures" selected>Futures</option>
+              <option value="spot">Spot</option>
+            </select>
+          </div>
+
+          <div class="input-group">
+            <label>Horizon</label>
+            <select id="paper-horizon" class="dark-input">
+              <option value="15m">15m</option>
+              <option value="1h" selected>1h</option>
+              <option value="4h">4h</option>
+            </select>
+          </div>
+
+          <button class="btn-run" onclick="refreshAll()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+          <button class="btn-run" onclick="generatePaperRecs()"><i class="fa-solid fa-wand-magic-sparkles"></i> Generate</button>
+        </div>
+
+        <div id="paper-status" class="status-line"></div>
+      </div>
+
+      <div class="two-col">
+        <div class="panel">
+          <h3><i class="fa-solid fa-ranking-star"></i> Leaderboard</h3>
+          <div style="overflow-x:auto;">
+            <table>
+              <thead>
+                <tr><th>Strategy</th><th>Trades</th><th>Win%</th><th>Avg Return%</th></tr>
+              </thead>
+              <tbody id="paper-leaderboard-body">
+                <tr><td colspan="4">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3><i class="fa-solid fa-lightbulb"></i> Recommendations</h3>
+          <div style="overflow-x:auto;">
+            <table>
+              <thead>
+                <tr><th>Key</th><th>Current</th><th>Suggested</th><th>Score</th><th>Status</th><th>Action</th></tr>
+              </thead>
+              <tbody id="paper-recs-body">
+                <tr><td colspan="6">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="status-line" style="margin-top:10px; color: var(--muted);">
+            * Approve/Reject بيطبّق على Settings مباشرة.
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3><i class="fa-solid fa-comment-dots"></i> Reason</h3>
+        <div id="paper-reason-box" style="color: var(--muted); font-size:0.9rem; line-height:1.6;">
+          Click any recommendation row to view its full reason here.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+  function params() {
+    const days = document.getElementById("paper-days").value || "7";
+    const market = document.getElementById("paper-market").value || "futures";
+    const horizon = document.getElementById("paper-horizon").value || "1h";
+    return { days, market, horizon };
+  }
+
+  async function loadLeaderboard() {
+    const { days, market, horizon } = params();
+    const tbody = document.getElementById("paper-leaderboard-body");
+    tbody.innerHTML = "<tr><td colspan='4'>Loading...</td></tr>";
+
+    try {
+      const url = `/api/paper/leaderboard?days=${encodeURIComponent(days)}&market=${encodeURIComponent(market)}&horizon=${encodeURIComponent(horizon)}`;
+      const res = await fetch(url, { credentials: "same-origin" });
+      const data = await res.json();
+
+      const items = data?.items || [];
+      if (!items.length) {
+        tbody.innerHTML = "<tr><td colspan='4'>No data yet.</td></tr>";
+        return;
+      }
+
+      tbody.innerHTML = items.map(x => `
+        <tr>
+          <td>${x.strategy_tag || "unknown"}</td>
+          <td>${x.trades ?? 0}</td>
+          <td>${x.win_rate ?? 0}</td>
+          <td>${x.avg_return ?? 0}</td>
+        </tr>
+      `).join("");
+    } catch (e) {
+      tbody.innerHTML = "<tr><td colspan='4'>Error loading leaderboard.</td></tr>";
+    }
+  }
+
+  async function loadRecs() {
+    const tbody = document.getElementById("paper-recs-body");
+    tbody.innerHTML = "<tr><td colspan='6'>Loading...</td></tr>";
+
+    try {
+      const res = await fetch(`/api/paper/recommendations`, { credentials: "same-origin" });
+      const data = await res.json();
+      const items = data?.items || [];
+
+      if (!items.length) {
+        tbody.innerHTML = "<tr><td colspan='6'>No recommendations yet.</td></tr>";
+        return;
+      }
+
+      tbody.innerHTML = items.map(r => `
+        <tr onclick="showReason(${JSON.stringify(r.reason || "").replace(/</g,'&lt;')})" style="cursor:pointer;">
+          <td>${r.key ?? ""}</td>
+          <td>${r.current_value ?? ""}</td>
+          <td><b style="color: var(--accent)">${r.suggested_value ?? ""}</b></td>
+          <td>${(r.score ?? 0)}</td>
+          <td>${badge(r.status)}</td>
+          <td>
+            ${(r.status === "PENDING") ? `
+              <button class="action-btn action-approve" onclick="event.stopPropagation(); approveRec(${r.id})">Approve</button>
+              <button class="action-btn action-reject" onclick="event.stopPropagation(); rejectRec(${r.id})">Reject</button>
+            ` : "-"}
+          </td>
+        </tr>
+      `).join("");
+    } catch (e) {
+      tbody.innerHTML = "<tr><td colspan='6'>Error loading recommendations.</td></tr>";
+    }
+  }
+
+  function badge(status){
+    if (status === "APPROVED") return `<span class="pill ok">APPROVED</span>`;
+    if (status === "REJECTED") return `<span class="pill bad">REJECTED</span>`;
+    return `<span class="pill">PENDING</span>`;
+  }
+
+  function showReason(reason){
+    const box = document.getElementById("paper-reason-box");
+    box.textContent = reason || "(no reason)";
+  }
+
+  
+  async function generateStrategyRecs() {
+    const st = document.getElementById("paper-status");
+    st.textContent = "Generating strategy (learning)...";
+
+    try {
+      const res = await fetch(`/api/paper/strategy/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ n: 120, top: 10, lookback_hours: 720, window_minutes: 720 })
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== "ok") throw new Error(data.detail || data.msg || "failed");
+      st.textContent = `OK • strategy generated • date ${data.date_utc ?? ""}`;
+      await loadRecs();
+    } catch (e) {
+      st.textContent = "Error generating strategy.";
+      console.error(e);
+    }
+  }
+
+async function generatePaperRecs() {
+    const { days, market, horizon } = params();
+    const st = document.getElementById("paper-status");
+    st.textContent = "Generating...";
+
+    try {
+      const res = await fetch(`/api/paper/recommendations/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ days: parseInt(days), market, horizon })
+      });
+      const data = await res.json();
+      st.textContent = `OK • generated ${data.count ?? 0} • date ${data.date_utc ?? ""}`;
+      await loadRecs();
+    } catch (e) {
+      st.textContent = "Error generating recommendations.";
+    }
+  }
+
+  async function approveRec(id) {
+    await fetch(`/api/paper/recommendations/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ id })
+    });
+    await loadRecs();
+  }
+
+  async function rejectRec(id) {
+    await fetch(`/api/paper/recommendations/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ id })
+    });
+    await loadRecs();
+  }
+
+  async function refreshAll(){
+    document.getElementById("paper-status").textContent = "";
+    await loadLeaderboard();
+    await loadRecs();
+  }
+
+  window.addEventListener("load", refreshAll);
+</script>
+</body>
+</html>

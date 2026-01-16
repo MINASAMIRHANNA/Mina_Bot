@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trade Pro Terminal</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body onload="try{window.loadSignalInbox && loadSignalInbox({status:(document.getElementById('signal-status-filter')||{}).value||'PENDING_APPROVAL',limit:30});}catch(e){}">
+
+    <header class="header">
+        <div class="brand"><i class="fa-solid fa-chart-simple"></i> TRADE PRO</div>
+        <div class="header-controls">
+            <a href="/analytics" style="background: #238636; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 0.85rem; margin-right: 15px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">Analytics</a>
+            <div class="status-pill"><span class="dot green"></span> <span id="status-text">Connected</span></div>
+            <select id="mode-select" onchange="updateSettings()" style="background:#0d1117; color:white; border:1px solid #30363d; padding:5px; border-radius:4px;">
+                <option value="TEST">🛡️ TEST MODE</option>
+                <option value="LIVE">🔥 LIVE MODE</option>
+            </select>
+        </div>
+    </header>
+
+    <div class="main-layout">
+        <aside class="sidebar">
+            <div class="panel">
+                <div class="panel-head"><i class="fa-solid fa-wallet"></i> Performance Analytics</div>
+                <div class="stats-grid-mini">
+                    <div class="stat-box"><span class="stat-lbl">Realized PnL</span><div id="pnl-value" class="stat-val-big">$0.00</div></div>
+                    <div class="stat-box"><span class="stat-lbl">Floating PnL</span><div id="open-pnl-value" class="stat-val-big">$0.00</div></div>
+                </div>
+                <div class="stats-row">
+                    <div class="stat-item"><span class="stat-lbl">Win Rate</span><span id="win-rate" class="stat-val">0%</span></div>
+                    <div class="stat-item"><span class="stat-lbl">Total Fees</span><span id="fees-total" class="stat-val" style="color:#da3633">$0.00</span></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-head"><i class="fa-solid fa-sliders"></i> Risk & Strategy</div>
+                <div class="form-grid">
+                    <div class="input-wrap"><label>Scalp $</label><input type="number" id="scalp-size" placeholder="100"></div>
+                    <div class="input-wrap"><label>Swing $</label><input type="number" id="swing-size" placeholder="500"></div>
+                </div>
+                <div class="form-grid">
+                    <div class="input-wrap"><label>Max Trades</label><input type="number" id="max-concurrent-trades" placeholder="30"></div>
+                    <div class="input-wrap"><label>Max Exposure $</label><input type="number" id="max-trade-usd" placeholder="2000"></div>
+                </div>
+                <div class="input-wrap">
+                    <label>Strategy Mode</label>
+                    <select id="strategy-mode" onchange="updateSettings()" class="dark-input">
+                        <option value="CONSERVATIVE">🛡️ CONSERVATIVE</option>
+                        <option value="AGGRESSIVE">⚡ AGGRESSIVE</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" onclick="updateSettings()">Apply Configuration</button>
+            </div>
+
+            <div class="panel">
+                <div class="panel-head"><i class="fa-solid fa-ban"></i> Asset Control</div>
+                <div class="input-wrap">
+                    <label>Blacklist (Symbol1, Symbol2)</label>
+                    <textarea id="blacklist-input" class="dark-input" style="height:50px;"></textarea>
+                </div>
+                <button class="btn btn-secondary" onclick="updateSettings()" style="width:100%">Save Blacklist</button>
+            </div>
+
+            <div class="panel" style="flex:1; min-height: 250px;">
+                <div class="panel-head"><i class="fa-solid fa-code"></i> Live Terminal</div>
+                <div id="console-logs" class="terminal-box"></div>
+            </div>
+        </aside>
+
+        <main class="content-area">
+            <div class="tabs-nav">
+                <button class="tab-btn active" onclick="switchTab('trade')"><i class="fa-solid fa-bolt"></i> Live Ops</button>
+                <button class="tab-btn" onclick="switchTab('analytics')"><i class="fa-solid fa-chart-line"></i> Analytics</button>
+                <button class="tab-btn" onclick="switchTab('config')"><i class="fa-solid fa-sliders"></i> AI Config</button>
+                <button class="tab-btn" onclick="switchTab('lab')"><i class="fa-solid fa-flask"></i> Strategy Lab</button>
+                <button class="tab-btn" onclick="switchTab('secrets')"><i class="fa-solid fa-key"></i> Env Settings</button>
+                <button class="tab-btn" onclick="switchTab('manual')"><i class="fa-solid fa-hand-holding-dollar"></i> Manual Ops</button>
+                <button class="tab-btn" onclick="location.href='/paper'"><i class="fa-solid fa-trophy"></i> Paper Arena</button>
+            <button class="tab-btn" onclick="location.href='/pump'"><i class="fa-solid fa-bolt"></i> Pump Hunter</button>
+            <button class="tab-btn" onclick="location.href='/doctor'"><i class="fa-solid fa-stethoscope"></i> Project Doctor</button>
+
+                <button class="tab-btn" onclick="switchTab('report')"><i class="fa-solid fa-chart-pie"></i> Report</button>
+                <button class="tab-btn" onclick="switchTab('api')"><i class="fa-solid fa-network-wired"></i> API</button>
+                <button class="tab-btn" onclick="switchTab('allsettings')"><i class="fa-solid fa-gear"></i> All Settings</button>
+                <button class="tab-btn" onclick="switchTab('system')"><i class="fa-solid fa-server"></i> System</button>
+                
+            </div>
+
+            <div id="view-trade" class="tab-content active">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                    <h2 style="font-size:1rem; margin:0;"><i class="fa-solid fa-list-ul"></i> Active Positions</h2>
+                    <button class="btn-refresh" onclick="fetchPositions()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+                </div>
+                <div id="positions-grid" class="grid-container">
+                    <div class="empty-state" style="padding:40px; text-align:center; color:#848d97; border:1px dashed #30363d;">No active positions</div>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin:20px 0 15px 0;">
+                    <h2 style="font-size:1rem; margin:0;"><i class="fa-solid fa-tower-broadcast"></i> Signal Inbox</h2>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <select id="signal-status-filter" class="dark-input" style="min-width:180px;"
+                                onchange="window.loadSignalInbox && loadSignalInbox({status:this.value, limit:30});">
+                            <option value="PENDING_APPROVAL" selected>⏳ Pending Approval</option>
+                            <option value="">📥 All Signals</option>
+                            <option value="APPROVED">✅ Approved</option>
+                            <option value="REJECTED">❌ Rejected</option>
+                            <option value="EXECUTED">⚡ Executed</option>
+                        </select>
+                        <button class="btn-refresh"
+                                onclick="window.loadSignalInbox && loadSignalInbox({status: (document.getElementById('signal-status-filter')||{}).value || 'PENDING_APPROVAL', limit:30});">
+                            <i class="fa-solid fa-rotate-right"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div style="font-size:0.8rem; color:#8b949e; margin:-6px 0 10px 0;">
+                    Recommendations from the bot. In <b>LIVE</b> mode, execution should happen only after <b>Approve</b>.
+                </div>
+
+                <div id="signals" style="display:flex; flex-direction:column; gap:10px;"></div>
+            </div>
+
+            <div id="view-analytics" class="tab-content">
+                <div class="stats-grid-large">
+                    <div class="panel stat-card"><span class="card-lbl">Profit Factor</span><span id="profit-factor" class="card-val">0.00</span></div>
+                    <div class="panel stat-card"><span class="card-lbl">Avg Trade Duration</span><span id="avg-duration" class="card-val">0h 0m</span></div>
+                    <div class="panel stat-card"><span class="card-lbl">Max Drawdown</span><span id="max-drawdown" class="card-val" style="color:#da3633">0.0%</span></div>
+                </div>
+                <div class="panel" style="height:400px; margin-top:20px;">
+                    <div class="panel-head">Account Equity Curve (Live)</div>
+                    <canvas id="equityChart"></canvas>
+                </div>
+            </div>
+
+            <div id="view-config" class="tab-content">
+                <div class="panel" style="margin-bottom:20px; border:1px solid rgba(88,166,255,0.35);">
+                    <div class="panel-head"><i class="fa-solid fa-sliders"></i> Core Trading Controls (from AI Config)</div>
+                    <div style="font-size:0.82rem; color:#8b949e; margin-top:-6px; margin-bottom:12px;">
+                        These are the <b>main runtime trading settings</b> stored in DB (<code>settings</code> table). This panel is the primary place to control them.
+                    </div>
+
+                    <h3 style="color:#58a6ff; font-size:0.9rem; margin:10px 0 10px 0; border-left: 3px solid #58a6ff; padding-left: 10px;">💼 Position Sizing & Limits</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Scalp Size ($)</label><input type="number" id="ai-core-scalp-size" class="dark-input" placeholder="100"></div>
+                        <div class="input-wrap"><label>Swing Size ($)</label><input type="number" id="ai-core-swing-size" class="dark-input" placeholder="500"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Max Trade USD</label><input type="number" id="ai-core-max-trade-usd" class="dark-input" placeholder="2000"></div>
+                        <div class="input-wrap"><label>Max Concurrent Trades</label><input type="number" id="ai-core-max-trades" class="dark-input" placeholder="30"></div>
+                    </div>
+
+                    <h3 style="color:#3fb950; font-size:0.9rem; margin:18px 0 10px 0; border-left: 3px solid #3fb950; padding-left: 10px;">⚙️ Leverage & Risk</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Scalp Leverage</label><input type="number" id="ai-core-lev-scalp" class="dark-input" placeholder="20"></div>
+                        <div class="input-wrap"><label>Swing Leverage</label><input type="number" id="ai-core-lev-swing" class="dark-input" placeholder="10"></div>
+                        <div class="input-wrap"><label>Max Leverage</label><input type="number" id="ai-core-max-lev" class="dark-input" placeholder="20"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Entry Threshold</label><input type="number" step="0.01" id="ai-core-entry-threshold" class="dark-input" placeholder="0.2"></div>
+                        <div class="input-wrap"><label>Trail Trigger</label><input type="number" step="0.001" id="ai-core-trail-trigger" class="dark-input" placeholder="0.01"></div>
+                        <div class="input-wrap"><label>Trail Trigger ROI</label><input type="number" step="0.001" id="ai-core-trail-trigger-roi" class="dark-input" placeholder="0.01"></div>
+                    </div>
+
+                    <h3 style="color:#d2a8ff; font-size:0.9rem; margin:18px 0 10px 0; border-left: 3px solid #d2a8ff; padding-left: 10px;">🛡️ Execution Governance</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Require Dashboard Approval</label>
+                            <select id="ai-core-require-approval" class="dark-input">
+                                <option value="TRUE">TRUE</option>
+                                <option value="FALSE">FALSE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Auto Approve LIVE</label>
+                            <select id="ai-core-auto-live" class="dark-input">
+                                <option value="FALSE">FALSE</option>
+                                <option value="TRUE">TRUE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Auto Approve PAPER</label>
+                            <select id="ai-core-auto-paper" class="dark-input">
+                                <option value="TRUE">TRUE</option>
+                                <option value="FALSE">FALSE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Block If Open Position</label>
+                            <select id="ai-core-block-open" class="dark-input">
+                                <option value="FALSE">FALSE</option>
+                                <option value="TRUE">TRUE</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <h3 style="color:#ffa657; font-size:0.9rem; margin:18px 0 10px 0; border-left: 3px solid #ffa657; padding-left: 10px;">⏱️ Cooldowns & Dedupe</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Cooldown After Trade (sec)</label><input type="number" id="ai-core-cd-trade" class="dark-input" placeholder="0"></div>
+                        <div class="input-wrap"><label>Cooldown After SL (sec)</label><input type="number" id="ai-core-cd-sl" class="dark-input" placeholder="0"></div>
+                        <div class="input-wrap"><label>Inbox Dedupe (sec)</label><input type="number" id="ai-core-dedupe" class="dark-input" placeholder="60"></div>
+                        <div class="input-wrap"><label>Symbol Lock TTL (sec)</label><input type="number" id="ai-core-lock-ttl" class="dark-input" placeholder="60"></div>
+                    </div>
+
+                    <h3 style="color:#f2cc60; font-size:0.9rem; margin:18px 0 10px 0; border-left: 3px solid #f2cc60; padding-left: 10px;">🧯 Safety</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Hard TP Enabled</label>
+                            <select id="ai-core-hard-tp" class="dark-input">
+                                <option value="FALSE">FALSE</option>
+                                <option value="TRUE">TRUE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Ensure Protection Orders</label>
+                            <select id="ai-core-ensure-protect" class="dark-input">
+                                <option value="TRUE">TRUE</option>
+                                <option value="FALSE">FALSE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap"><label>Ensure Every (sec)</label><input type="number" id="ai-core-ensure-sec" class="dark-input" placeholder="60"></div>
+                        <div class="input-wrap">
+                            <label>Strategy Mode</label>
+                            <select id="ai-core-strategy-mode" class="dark-input">
+                                <option value="CONSERVATIVE">CONSERVATIVE</option>
+                                <option value="AGGRESSIVE">AGGRESSIVE</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="input-wrap" style="margin-top:10px;">
+                        <label>Blacklist (Symbol1, Symbol2)</label>
+                        <textarea id="ai-core-blacklist" class="dark-input" style="height:55px;"></textarea>
+                    </div>
+
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
+                        <button class="btn btn-primary" onclick="saveCoreTradingSettings()" style="flex:1; min-width:220px;">
+                            <i class="fa-solid fa-floppy-disk"></i> Save Core Trading Settings
+                        </button>
+                        <button class="btn btn-secondary" onclick="reloadCoreTradingSettings()" style="width:auto;">
+                            <i class="fa-solid fa-rotate-right"></i> Reload
+                        </button>
+                        <button class="btn btn-warning" onclick="sendReloadModels()" style="width:auto;">
+                            <i class="fa-solid fa-microchip"></i> Reload Models
+                        </button>
+                    </div>
+
+                    <div style="font-size:0.78rem; color:#8b949e; margin-top:10px;">
+                        Tip: for troubleshooting, you can still use <b>All Settings</b> tab (raw DB), but day-to-day control should be here.
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-head"><i class="fa-solid fa-microchip"></i> Logic Gate Parameters</div>
+                    <h3 style="color:#58a6ff; font-size:0.9rem; margin:15px 0 10px 0; border-left: 3px solid #58a6ff; padding-left: 10px;">🛡️ Entry Filters (Gates)</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Min Volatility (ATR %)</label><input type="number" step="0.001" id="cfg-atr" class="dark-input" placeholder="0.003"></div>
+                        <div class="input-wrap"><label>Min Trend Strength (ADX)</label><input type="number" id="cfg-adx" class="dark-input" placeholder="10"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Max RSI to Buy</label><input type="number" id="cfg-rsi" class="dark-input" placeholder="70"></div>
+                        <div class="input-wrap"><label>Pump Score Threshold</label><input type="number" id="cfg-pump" class="dark-input" placeholder="75"></div>
+                    </div>
+                    <h3 style="color:#d2a8ff; font-size:0.9rem; margin:20px 0 10px 0; border-left: 3px solid #d2a8ff; padding-left: 10px;">🧠 AI Confidence Thresholds</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Min Confidence (Scalp)</label><input type="number" id="cfg-min-scalp" class="dark-input" placeholder="55"></div>
+                        <div class="input-wrap"><label>Min Confidence (Swing)</label><input type="number" id="cfg-min-swing" class="dark-input" placeholder="65"></div>
+                    </div>
+
+                    <h3 style="color:#3fb950; font-size:0.9rem; margin:20px 0 10px 0; border-left: 3px solid #3fb950; padding-left: 10px;">💰 Risk & Reward Multipliers (ATR)</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Scalp SL Mult</label><input type="number" step="0.1" id="cfg-sl-scalp" class="dark-input" placeholder="0.8"></div>
+                        <div class="input-wrap"><label>Scalp TP Mult</label><input type="number" step="0.1" id="cfg-tp-scalp" class="dark-input" placeholder="1.2"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Swing SL Mult</label><input type="number" step="0.1" id="cfg-sl-swing" class="dark-input" placeholder="1.5"></div>
+                        <div class="input-wrap"><label>Swing TP Mult</label><input type="number" step="0.1" id="cfg-tp-swing" class="dark-input" placeholder="2.0"></div>
+                    </div>
+                    <h3 style="color:#3fb950; font-size:0.9rem; margin:20px 0 10px 0; border-left:3px solid #3fb950; padding-left: 10px;">🪁 Exchange Trailing Stop (Binance)</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Enable Exchange Trailing</label>
+                            <select id="cfg-extrail-enabled" class="dark-input">
+                                <option value="FALSE">FALSE</option>
+                                <option value="TRUE">TRUE</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Activation ROI (e.g. 0.01 = 1%)</label>
+                            <input type="number" step="0.001" id="cfg-extrail-activate" class="dark-input" placeholder="0.01">
+                        </div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Callback Rate % (0.1 - 5.0)</label>
+                            <input type="number" step="0.1" id="cfg-extrail-callback" class="dark-input" placeholder="0.3">
+                        </div>
+                        <div class="input-wrap">
+                            <label>Working Type</label>
+                            <select id="cfg-extrail-working" class="dark-input">
+                                <option value="MARK_PRICE">MARK_PRICE</option>
+                                <option value="CONTRACT_PRICE">CONTRACT_PRICE</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div style="color:#8b949e; font-size:0.85rem; margin-top:6px;">
+                        When enabled, the bot places a native <b>TRAILING_STOP_MARKET</b> (reduceOnly) after ROI reaches Activation.
+                        This keeps profit-protection working even if the bot restarts or internet drops.
+                    </div>
+
+
+
+                    <h3 style="color:#f2cc60; font-size:0.9rem; margin:20px 0 10px 0; border-left: 3px solid #f2cc60; padding-left: 10px;">📊 Technical Indicators Parameters</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>RSI Length</label><input type="number" id="cfg-rsi-len" class="dark-input" placeholder="14"></div>
+                        <div class="input-wrap"><label>ADX Length</label><input type="number" id="cfg-adx-len" class="dark-input" placeholder="14"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Fast EMA (Length)</label><input type="number" id="cfg-ma-fast" class="dark-input" placeholder="50"></div>
+                        <div class="input-wrap"><label>Slow EMA (Length)</label><input type="number" id="cfg-ma-slow" class="dark-input" placeholder="200"></div>
+                    </div>
+                    <h3 style="color:#ffa657; font-size:0.9rem; margin:20px 0 10px 0; border-left: 3px solid #ffa657; padding-left: 10px;">
+                        🏆 Paper Tournament (Daily - UTC)
+                    </h3>
+
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Enable Paper Tournament</label>
+                            <select id="cfg-paper-enabled" class="dark-input">
+                                <option value="TRUE">TRUE</option>
+                                <option value="FALSE">FALSE</option>
+                            </select>
+                        </div>
+
+                        <div class="input-wrap">
+                            <label>Daily Evaluator Enabled</label>
+                            <select id="cfg-paper-daily" class="dark-input">
+                                <option value="TRUE">TRUE</option>
+                                <option value="FALSE">FALSE</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Daily Run Time (UTC)</label>
+                            <input type="time" id="cfg-paper-time" class="dark-input" value="00:05" step="60">
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary" onclick="saveAdvancedConfig()" style="margin-top:20px; width:100%">Update All Neural Parameters</button>
+                </div>
+            </div>
+
+            <div id="view-lab" class="tab-content">
+                <div class="panel">
+                    <div class="panel-head"><i class="fa-solid fa-brain"></i> AI Learning Matrix</div>
+                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.85rem; color:#e6edf3;">
+                        <thead>
+                            <tr style="border-bottom:1px solid #30363d; color:#8b949e;">
+                                <th style="padding:10px;">Strategy Profile</th><th>Trades</th><th>Win Rate</th><th>Net PnL</th><th>AI Adjustment</th>
+                            </tr>
+                        </thead>
+                        <tbody id="learning-table-body"></tbody>
+                    </table>
+                    <div style="margin-top:20px; text-align:center;">
+                        <button class="btn btn-secondary" onclick="forceRetrain()"><i class="fa-solid fa-rotate"></i> Force Re-Train AI Models Now</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="view-secrets" class="tab-content">
+                <div class="panel">
+                    <div class="panel-head"><i class="fa-solid fa-key"></i> Runtime Configuration (DB - Zero-ENV)</div>
+                    <p style="font-size:0.8rem; color:#da3633; margin-bottom:15px; background:rgba(218,54,51,0.1); padding:10px; border-radius:4px;">
+                        ⚠️ <b>Note:</b> Changes here write to the SQLite <code>settings</code> table (no .env). If <code>main.py</code> is running, it will auto-reload config for API/System changes to take effect.
+                    </p>
+                    
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:10px 0;">🔑 Credentials</h3>
+                    <div class="input-wrap" style="margin-bottom:10px;"><label>Binance API Key</label><input type="text" id="env-binance-key" class="dark-input"></div>
+                    <div class="input-wrap" style="margin-bottom:10px;"><label>Binance API Secret</label><input type="password" id="env-binance-secret" class="dark-input"></div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Telegram Token</label><input type="text" id="env-tg-token" class="dark-input"></div>
+                        <div class="input-wrap"><label>Chat ID</label><input type="text" id="env-tg-id" class="dark-input"></div>
+                        <div class="input-wrap"><label>Error Chat ID</label><input type="text" id="env-tg-err-id" class="dark-input"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">⚙️ System & Mode</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Use Testnet</label><select id="env-use-testnet" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>Enable Live Trading</label><select id="env-live-trading" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>Run Mode</label><input type="text" id="env-run-mode" class="dark-input"></div>
+                        <div class="input-wrap"><label>Heartbeat (sec)</label><input type="number" id="env-heartbeat" class="dark-input"></div>
+                        <div class="input-wrap"><label>WS Chunk Size</label><input type="number" id="env-chunk" class="dark-input"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🛡️ Risk Management</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Trail Trigger</label><input type="number" step="0.001" id="env-trail" class="dark-input"></div>
+                        <div class="input-wrap"><label>Risk Per Trade (%)</label><input type="number" step="0.01" id="env-risk-pct" class="dark-input"></div>
+                        <div class="input-wrap"><label>Max Leverage</label><input type="number" id="env-max-lev" class="dark-input"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Scalp Leverage</label><input type="number" id="env-lev-scalp" class="dark-input"></div>
+                        <div class="input-wrap"><label>Swing Leverage</label><input type="number" id="env-lev-swing" class="dark-input"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🎯 Strategy & Scanner</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>SL Multiplier</label><input type="number" step="0.1" id="env-sl-mult" class="dark-input"></div>
+                        <div class="input-wrap"><label>TP Multiplier</label><input type="number" step="0.1" id="env-tp-mult" class="dark-input"></div>
+                        <div class="input-wrap"><label>Entry Threshold</label><input type="number" step="0.1" id="env-entry-thresh" class="dark-input"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Watch Vol Limit</label><input type="number" id="env-vol-limit" class="dark-input"></div>
+                        <div class="input-wrap"><label>Watch Gainers Limit</label><input type="number" id="env-gain-limit" class="dark-input"></div>
+                        <div class="input-wrap"><label>Max Concurrent Tasks</label><input type="number" id="env-max-tasks" class="dark-input"></div>
+                        <div class="input-wrap"><label>Startup Scan Limit</label><input type="number" id="env-startup-limit" class="dark-input"></div>
+                    </div>
+
+                                        <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🌐 Binance REST / WS Bases</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Futures REST Base</label><input type="text" id="env-fut-rest" class="dark-input" placeholder="https://fapi.binance.com"></div>
+                        <div class="input-wrap"><label>Futures WS Base</label><input type="text" id="env-fut-ws" class="dark-input" placeholder="wss://fstream.binance.com"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🖥️ Dashboard & Publish</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>BOT Name</label><input type="text" id="env-bot-name" class="dark-input" placeholder="TradePro_v1"></div>
+                        <div class="input-wrap"><label>Dashboard URL</label><input type="text" id="env-dashboard-url" class="dark-input" placeholder="http://localhost:8000"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Dashboard Publish URL (optional)</label><input type="text" id="env-dashboard-publish-url" class="dark-input" placeholder=""></div>
+                        <div class="input-wrap"><label>Dashboard Publish Token</label><input type="password" id="env-dashboard-publish-token" class="dark-input" placeholder=""></div>
+                        <div class="input-wrap">
+                            <label>Dashboard Envelope</label>
+                            <select id="env-dashboard-envelope" class="dark-input"><option value="true">True</option><option value="false">False</option></select>
+                        </div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🧠 Model Flags</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap">
+                            <label>Disable SHORT (Global)</label>
+                            <select id="env-ai-disable-short" class="dark-input"><option value="true">True</option><option value="false">False</option></select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Use Closed Loop Models</label>
+                            <select id="env-closed-loop" class="dark-input"><option value="true">True</option><option value="false">False</option></select>
+                        </div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">📡 Websocket Runtime (DB)</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Futures WS Enabled</label><select id="env-fut-ws-enabled" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>Spot WS Enabled</label><select id="env-spot-ws-enabled" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>Futures WS Timeframes</label><input type="text" id="env-fut-ws-tf" class="dark-input" placeholder="1m,5m,1h"></div>
+                        <div class="input-wrap"><label>Spot WS Timeframe</label><input type="text" id="env-spot-ws-tf" class="dark-input" placeholder="1m"></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Futures Symbol Limit (0=all)</label><input type="number" id="env-fut-sym-limit" class="dark-input" placeholder="0"></div>
+                        <div class="input-wrap"><label>Spot Symbol Limit (0=all)</label><input type="number" id="env-spot-sym-limit" class="dark-input" placeholder="0"></div>
+                        <div class="input-wrap"><label>WS Callback Concurrency</label><input type="number" id="env-ws-callback-conc" class="dark-input" placeholder="0"></div>
+                        <div class="input-wrap"><label>Reload Models Cooldown (sec)</label><input type="number" id="env-reload-cooldown" class="dark-input" placeholder="60"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🧾 Snapshot & Audit</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Snapshot Enabled</label><select id="env-snapshot-enabled" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>Equity Snapshot Every (sec)</label><input type="number" id="env-equity-snap-sec" class="dark-input" placeholder="60"></div>
+                        <div class="input-wrap"><label>Snapshot Retention (days)</label><input type="number" id="env-snap-ret-days" class="dark-input" placeholder="30"></div>
+                        <div class="input-wrap"><label>Paper Tournament Enabled</label><select id="env-paper-tournament-enabled" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>Disable Audit Lab</label><select id="env-disable-audit-lab" class="dark-input"><option value="false">False</option><option value="true">True</option></select></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">📈 Open Interest (OI) Runtime</h3>
+                    <div class="form-grid">
+                        <div class="input-wrap"><label>OI Log Errors</label><select id="env-oi-log-errors" class="dark-input"><option value="true">True</option><option value="false">False</option></select></div>
+                        <div class="input-wrap"><label>OI Error Throttle (sec)</label><input type="number" step="0.1" id="env-oi-throttle" class="dark-input" placeholder="60"></div>
+                        <div class="input-wrap"><label>OI Symbol Delay (sec)</label><input type="number" step="0.1" id="env-oi-sym-delay" class="dark-input" placeholder="1"></div>
+                        <div class="input-wrap"><label>OI Cycle Delay (sec)</label><input type="number" step="0.1" id="env-oi-cycle-delay" class="dark-input" placeholder="30"></div>
+                        <div class="input-wrap"><label>OI Baseline Window (sec)</label><input type="number" step="0.1" id="env-oi-baseline" class="dark-input" placeholder="300"></div>
+                    </div>
+
+                    <h3 style="font-size:0.9rem; color:#58a6ff; margin:15px 0 10px 0;">🛠️ System Controls (from Env Settings)</h3>
+                    <div class="panel" style="background:#0d1117; border:1px solid #30363d; padding:12px; border-radius:10px;">
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;">
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div style="font-size:0.9rem;"><b>Bot</b>: <span id="env-sys-status" style="color:#8b949e;">-</span> <span id="env-sys-last" style="color:#8b949e;"></span></div>
+                                <div style="font-size:0.8rem; color:#8b949e;"><b>kill_switch</b>: <span id="env-sys-kill">-</span> • Reason: <span id="env-sys-kill-reason">-</span></div>
+                                <div style="font-size:0.8rem; color:#8b949e;">ExecMon age: <span id="env-sys-exec-age">-</span>s • Latency: <span id="env-sys-lat">-</span>ms</div>
+                            </div>
+                            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                                <button class="btn btn-danger" style="width:auto;" onclick="clearKillSwitch()"><i class="fa-solid fa-unlock"></i> Clear Kill Switch</button>
+                                <button class="btn btn-warning" style="width:auto;" onclick="sendReloadModels()"><i class="fa-solid fa-microchip"></i> Reload Models</button>
+                                <button class="btn btn-warning" style="width:auto;" onclick="restartBot()"><i class="fa-solid fa-rotate"></i> Restart Bot</button>
+                                <button class="btn btn-warning" style="width:auto;" onclick="restartMonitor()"><i class="fa-solid fa-rotate"></i> Restart Monitor</button>
+                                <button class="btn btn-secondary" style="width:auto;" onclick="fetchSystemHealth()"><i class="fa-solid fa-rotate-right"></i> Refresh Status</button>
+                            </div>
+                        </div>
+                        <div style="font-size:0.78rem; color:#d29922; margin-top:10px;">
+                            Restart buttons request the process to exit. For automatic restart, use the loop scripts.
+                        </div>
+                    </div>
+
+<button class="btn btn-primary" onclick="saveEnvSecrets()" style="margin-top:20px;">
+                        <i class="fa-solid fa-floppy-disk"></i> Save DB Config
+                    </button>
+                </div>
+            </div>
+
+            <div id="view-manual" class="tab-content">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div class="panel" style="border: 1px solid #1f6feb;">
+                        <div class="panel-head"><i class="fa-solid fa-eye"></i> Live Brain Inspector</div>
+                        <p style="font-size:0.8rem; color:#8b949e; margin-bottom:15px;">
+                            See exactly why the bot is buying or rejecting a coin right now.
+                        </p>
+                        <div style="display:flex; gap:10px;">
+                            <input type="text" id="insp-symbol" class="dark-input" placeholder="e.g. SOLUSDT">
+                            <button class="btn btn-primary" onclick="inspectCoin()">Scan</button>
+                        </div>
+                        <div id="insp-result" style="margin-top:20px; display:none;">
+                            <div style="background:#0d1117; padding:15px; border-radius:6px; border:1px solid #30363d;">
+                                <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+                                    <span id="insp-decision" style="font-weight:bold; font-size:1.1rem;">WAIT</span>
+                                    <span id="insp-price" style="color:#e6edf3;">$0.00</span>
+                                </div>
+                                <div id="insp-reason" style="color:#d2a8ff; font-size:0.9rem; margin-bottom:15px; border-bottom:1px solid #30363d; padding-bottom:10px;">Reason...</div>
+                                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:0.85rem;">
+                                    <div><span style="color:#8b949e;">RSI (Limit <span id="set-rsi">70</span>)</span><div id="val-rsi" style="font-weight:bold;">50</div></div>
+                                    <div><span style="color:#8b949e;">ADX (Min <span id="set-adx">10</span>)</span><div id="val-adx" style="font-weight:bold;">25</div></div>
+                                    <div><span style="color:#8b949e;">Vol (ATR)</span><div id="val-atr" style="font-weight:bold;">0.5%</div></div>
+                                    <div><span style="color:#8b949e;">Vol Spike?</span><div id="val-vol" style="font-weight:bold;">NO</div></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:20px;">
+                        <div class="panel">
+                            <div class="panel-head"><i class="fa-solid fa-gamepad"></i> Manual Execution</div>
+                            <div class="form-grid">
+                                <div class="input-wrap"><label>Symbol</label><input type="text" id="m-symbol" class="dark-input" placeholder="BTCUSDT"></div>
+                                <div class="input-wrap"><label>Amount ($)</label><input type="number" id="m-amount" class="dark-input" placeholder="100"></div>
+                            </div>
+                            <div class="form-grid">
+                                <div class="input-wrap"><label>Market</label><select id="m-market" class="dark-input"><option value="futures">Futures</option><option value="spot">Spot</option></select></div>
+                                <div class="input-wrap"><label>Direction</label><select id="m-side" class="dark-input"><option value="BUY">LONG / BUY</option><option value="SELL">SHORT / SELL</option></select></div>
+                            </div>
+                            <button class="btn btn-secondary" onclick="executeManualTrade()" style="width:100%; margin-top:15px;">Execute Trade</button>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><i class="fa-solid fa-graduation-cap"></i> Teach AI</div>
+                            <div class="input-wrap"><label>Symbol</label><input type="text" id="t-symbol" class="dark-input" placeholder="PEPEUSDT"></div>
+                            <div class="input-wrap"><label>Time</label><input type="datetime-local" id="t-time" class="dark-input"></div>
+                            <button class="btn btn-secondary" onclick="executeManualTrain()" style="width:100%; margin-top:15px;">Fetch & Learn</button>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-head"><i class="fa-solid fa-clock-rotate-left"></i> Historical Snapshot (UTC)</div>
+                            <p style="font-size:0.8rem; color:#8b949e; margin-bottom:15px;">
+                                Pick a time from the calendar and see <b>exact indicators</b> (RSI/ADX/ATR%), plus pump score.
+                                The time you choose is treated as <b>Local</b> and the system sends it as <b>UTC</b>.
+                            </p>
+
+                            <div class="form-grid">
+                                <div class="input-wrap">
+                                    <label>Symbol</label>
+                                    <input type="text" id="snap-symbol" class="dark-input" placeholder="e.g. SOLUSDT">
+                                </div>
+                                <div class="input-wrap">
+                                    <label>Market</label>
+                                    <select id="snap-market" class="dark-input">
+                                        <option value="futures">Futures</option>
+                                        <option value="spot">Spot</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="form-grid">
+                                <div class="input-wrap">
+                                    <label>At (Local Time)</label>
+                                    <input type="datetime-local" step="60" id="snap-at" class="dark-input">
+                                </div>
+                                <div class="input-wrap">
+                                    <label>Interval</label>
+                                    <select id="snap-interval" class="dark-input">
+                                        <option value="1m">1m</option>
+                                        <option value="5m" selected>5m</option>
+                                        <option value="15m">15m</option>
+                                        <option value="1h">1h</option>
+                                        <option value="4h">4h</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <button class="btn btn-secondary" onclick="runSnapshotAt()" style="width:100%; margin-top:10px;">
+                                Run Snapshot
+                            </button>
+
+                            <div style="margin-top:16px; padding-top:16px; border-top:1px solid #21262d;">
+                                <div class="panel-head" style="font-size:0.95rem;"><i class="fa-solid fa-chart-line"></i> From → To (Range)</div>
+
+                                <div class="form-grid">
+                                    <div class="input-wrap">
+                                        <label>From (Local)</label>
+                                        <input type="datetime-local" step="60" id="snap-from" class="dark-input">
+                                    </div>
+                                    <div class="input-wrap">
+                                        <label>To (Local)</label>
+                                        <input type="datetime-local" step="60" id="snap-to" class="dark-input">
+                                    </div>
+                                </div>
+
+                                <button class="btn btn-secondary" onclick="runSnapshotRange()" style="width:100%; margin-top:10px;">
+                                    Run Range
+                                </button>
+                            </div>
+
+                            <div id="snapshot-result" style="margin-top:15px; display:none;"></div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>                   
+
+
+<div id="view-report" class="tab-content">
+                <div class="stats-grid-large" style="margin-bottom:20px;">
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Total Net PnL</span>
+                        <span id="rep-net-pnl" class="card-val">$0.00</span>
+                    </div>
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Global Win Rate</span>
+                        <span id="rep-win-rate" class="card-val">0%</span>
+                    </div>
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Total Trades</span>
+                        <span id="rep-total-trades" class="card-val">0</span>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 20px;">
+                    <div class="panel" style="height:300px;">
+                        <div class="panel-head">Daily Profit/Loss (Last 14 Days)</div>
+                        <canvas id="dailyPnlChart"></canvas>
+                    </div>
+                    <div class="panel" style="height:300px;">
+                        <div class="panel-head">Long vs Short Performance</div>
+                        <canvas id="directionChart"></canvas>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div class="panel">
+                        <div class="panel-head">🏆 Best Performing Coins</div>
+                        <table style="width:100%; font-size:0.85rem; color:#e6edf3; border-collapse:collapse;">
+                            <thead>
+                                <tr style="border-bottom:1px solid #30363d; color:#8b949e;">
+                                    <th style="text-align:left; padding:8px;">Coin</th><th>Trades</th><th>Win Rate</th><th>PnL</th>
+                                </tr>
+                            </thead>
+                            <tbody id="top-coins-body"></tbody>
+                        </table>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-head">⚠️ Underperforming Coins</div>
+                        <table style="width:100%; font-size:0.85rem; color:#e6edf3; border-collapse:collapse;">
+                            <thead>
+                                <tr style="border-bottom:1px solid #30363d; color:#8b949e;">
+                                    <th style="text-align:left; padding:8px;">Coin</th><th>Trades</th><th>Win Rate</th><th>PnL</th>
+                                </tr>
+                            </thead>
+                            <tbody id="worst-coins-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div id="view-api" class="tab-content">
+                <div class="panel">
+                    <div class="panel-head"><i class="fa-solid fa-network-wired"></i> Webhook Integration</div>
+                    <p style="font-size:0.9rem; color:#8b949e; margin-bottom:15px;">
+                        Link this bot to your other apps (Postman, Node.js, Python, or TradingView).
+                        The bot will send a <b>POST request</b> to your URL whenever an event occurs.
+                    </p>
+
+                    <div class="input-wrap">
+                        <label>External Program URL (Webhook Endpoint)</label>
+                        <input type="text" id="webhook-url" class="dark-input" placeholder="https://api.myapp.com/receiver">
+                    </div>
+
+                    <div class="form-grid" style="margin-top:15px;">
+                        <div class="input-wrap">
+                            <label>Send Signals?</label>
+                            <select id="webhook-sig" class="dark-input">
+                                <option value="TRUE">Yes (Enable)</option>
+                                <option value="FALSE">No (Disable)</option>
+                            </select>
+                        </div>
+                        <div class="input-wrap">
+                            <label>Send Executed Trades?</label>
+                            <select id="webhook-trade" class="dark-input">
+                                <option value="TRUE">Yes (Enable)</option>
+                                <option value="FALSE">No (Disable)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; gap:10px; margin-top:20px;">
+                        <button class="btn btn-secondary" onclick="testWebhook()" style="flex:1;">
+                            <i class="fa-solid fa-paper-plane"></i> Send Test Ping
+                        </button>
+                        <button class="btn btn-primary" onclick="saveWebhookSettings()" style="flex:1;">
+                            <i class="fa-solid fa-floppy-disk"></i> Save Configuration
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            
+<div id="view-allsettings" class="tab-content">
+    <div class="panel">
+        <div class="panel-head"><i class="fa-solid fa-gear"></i> All Settings (DB)</div>
+        <p style="font-size:0.8rem; color:#8b949e; margin:0 0 10px 0;">
+            This shows <b>every</b> key stored in the bot settings table. Use it to control anything missing from other tabs.
+        </p>
+        <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+            <input id="allset-search" class="dark-input" placeholder="Search key..." style="flex:1;">
+            <button class="btn btn-secondary" onclick="loadAllSettings()"><i class="fa-solid fa-rotate-right"></i> Reload</button>
+            <button class="btn btn-blue" onclick="saveAllSettings()"><i class="fa-solid fa-floppy-disk"></i> Save Changed</button>
+        </div>
+
+        <div style="overflow:auto; max-height:60vh; border:1px solid #30363d; border-radius:8px;">
+            <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+                <thead style="position:sticky; top:0; background:#0d1117; z-index:2;">
+                    <tr style="border-bottom:1px solid #30363d; color:#8b949e;">
+                        <th style="padding:10px; text-align:left; width:35%;">Key</th>
+                        <th style="padding:10px; text-align:left;">Value</th>
+                        <th style="padding:10px; text-align:right; width:180px;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="allset-body"></tbody>
+            </table>
+        </div>
+        <div style="font-size:0.78rem; color:#d29922; margin-top:10px;">
+            ⚠️ Some values take effect immediately, others require <code>RELOAD_MODELS</code> or a restart (DB config changes).
+        </div>
+    </div>
+</div>
+
+            <div id="view-system" class="tab-content">
+                <div class="stats-grid-large" style="margin-bottom:20px;">
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Bot Status</span>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span id="sys-status-dot" class="dot red" style="width:15px; height:15px;"></span>
+                            <span id="sys-status-text" class="card-val">OFFLINE</span>
+                        </div>
+                        <span id="sys-last-seen" style="font-size:0.8rem; color:#8b949e;">Last heartbeat: Never</span>
+                    </div>
+
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Binance Latency</span>
+                        <span id="sys-latency" class="card-val">0 ms</span>
+                        <div class="progress-bar"><div id="bar-latency" class="fill" style="width:0%"></div></div>
+                    </div>
+
+                    <div class="panel stat-card">
+                        <span class="card-lbl">Database Size</span>
+                        <span id="sys-db-size" class="card-val">0 MB</span>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr; gap: 20px; margin-bottom:20px;">
+                    <div class="panel" style="border:1px solid #30363d;">
+                        <div class="panel-head"><i class="fa-solid fa-shield-halved"></i> Safety Controls</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;">
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div style="font-size:0.9rem;"><b>kill_switch</b>: <span id="sys-kill-switch" style="font-family:'JetBrains Mono', monospace;">0</span></div>
+                                <div style="font-size:0.8rem; color:#8b949e;">Reason: <span id="sys-kill-reason">-</span></div>
+                                <div style="font-size:0.8rem; color:#8b949e;">Execution Monitor age: <span id="sys-execmon-age">-</span>s</div>
+                            </div>
+                            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                                <button class="btn btn-danger" style="width:auto;" onclick="clearKillSwitch()"><i class="fa-solid fa-unlock"></i> Clear Kill Switch</button>
+                                <button class="btn btn-warning" style="width:auto;" onclick="restartBot()"><i class="fa-solid fa-rotate"></i> Restart Bot</button>
+                                <button class="btn btn-warning" style="width:auto;" onclick="restartMonitor()"><i class="fa-solid fa-rotate"></i> Restart Monitor</button>
+                            </div>
+                        </div>
+                        <div style="font-size:0.78rem; color:#d29922; margin-top:10px;">
+                            Restart buttons will request the process to exit. For automatic restart, run the provided loop scripts (<code>run_bot_loop.sh</code> / <code>run_monitor_loop.sh</code>).
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div class="panel">
+                        <div class="panel-head"><i class="fa-solid fa-microchip"></i> Server Resources</div>
+                        <div style="margin-bottom:15px;">
+                            <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>CPU Usage</span><span id="sys-cpu-val">0%</span></div>
+                            <div class="progress-bar"><div id="bar-cpu" class="fill" style="width:0%"></div></div>
+                        </div>
+                        <div>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>RAM Usage</span><span id="sys-ram-val">0%</span></div>
+                            <div class="progress-bar"><div id="bar-ram" class="fill" style="width:0%"></div></div>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-head"><i class="fa-solid fa-triangle-exclamation"></i> Recent Errors</div>
+                        <div id="sys-error-log" style="height:150px; overflow-y:auto; font-size:0.8rem; color:#da3633;"></div>
+                    </div>
+                </div>
+                
+                <div style="margin-top:20px; text-align:right;">
+                    <button class="btn btn-secondary" onclick="location.reload()">Refresh Page</button>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

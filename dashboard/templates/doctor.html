@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Project Doctor</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <style>
+    /* Ensure the page can scroll even if global CSS uses fixed heights */
+    html, body { height: auto !important; min-height: 100%; overflow-y: auto !important; }
+    body { margin: 0; background: #f4f6fb; color: #111827; }
+
+    .doctor-wrap { max-width: 1280px; margin: 16px auto; padding: 0 14px 64px; }
+    .doctor-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .doctor-head h1 { margin:0; font-size: 22px; letter-spacing: .2px; }
+    .sub { margin-top: 6px; font-size: 12px; color: rgba(17,24,39,.7); }
+
+    .head-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .btn { cursor:pointer; border:1px solid rgba(0,0,0,.12); border-radius:10px; padding:8px 12px; background:#fff; font-weight:700; }
+    .btn:active { transform: translateY(1px); }
+    .toggle { display:inline-flex; align-items:center; gap:8px; font-size: 12px; padding:6px 10px; border:1px solid rgba(0,0,0,.12); border-radius:999px; background:#fff; }
+    .toggle input { margin:0; }
+
+    .pill { padding:6px 10px; border-radius:999px; font-size:12px; font-weight:800; display:inline-flex; gap:6px; align-items:center; border:1px solid transparent; }
+    .ok { background:#e8fff1; color:#0b6b2f; border-color:#b9f3cf; }
+    .bad { background:#fff0f0; color:#8a0b0b; border-color:#ffcccc; }
+    .warn { background:#fff7e8; color:#7a4b00; border-color:#ffe0ad; }
+
+    .grid { display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; margin-top:12px; }
+    .card { background:#fff; border:1px solid rgba(0,0,0,.08); border-radius:14px; padding:14px; box-shadow:0 2px 10px rgba(0,0,0,.04); }
+    .card h3 { margin: 0 0 10px; font-size: 15px; }
+    .card .muted { margin-top: -6px; margin-bottom: 10px; font-size: 12px; color: rgba(17,24,39,.65); }
+    .card-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom: 8px; }
+    .card-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .mini { padding:6px 10px; font-size: 12px; font-weight:800; }
+
+    .col-6 { grid-column: span 6; }
+    .col-4 { grid-column: span 4; }
+    .col-12 { grid-column: span 12; }
+    @media (max-width: 900px){ .col-6,.col-4 { grid-column: span 12; } }
+
+    .kv { width:100%; border-collapse: collapse; }
+    .kv td { padding:6px 0; border-bottom:1px dashed rgba(0,0,0,.08); vertical-align:top; font-size: 13px; }
+    .kv td:first-child { width: 42%; font-weight:800; color: rgba(17,24,39,.85); }
+
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .comp { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid rgba(0,0,0,.08); border-radius:12px; background:#fafbff; }
+    .comp .left { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .comp .name { font-weight:900; }
+    .comp .meta { font-size:12px; color: rgba(17,24,39,.65); }
+
+    /* Readable JSON blocks */
+    pre.json {
+      margin: 0;
+      background: #0b1020;
+      color: #e6efff;
+      border-radius: 12px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.4;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .card.expanded pre.json { max-height: 72vh; }
+    ul.warnings { margin: 0; padding-left: 18px; }
+    ul.warnings li { margin: 6px 0; }
+
+    table.trace { width:100%; border-collapse: collapse; font-size: 13px; }
+    table.trace th, table.trace td { text-align:left; padding:8px; border-bottom:1px solid rgba(0,0,0,.08); vertical-align:top; }
+    table.trace th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: rgba(17,24,39,.65); }
+    .trace .reason { color: rgba(17,24,39,.75); }
+  </style>
+</head>
+<body>
+  <div class="doctor-wrap">
+    <div class="doctor-head">
+      <div>
+        <h1>Project Doctor</h1>
+        <div class="sub">Live diagnostics for bot ↔ dashboard ↔ execution monitor. Refreshes automatically.</div>
+      </div>
+      <div class="head-actions">
+        <span id="overall" class="pill warn">Loading…</span>
+        <span id="last_refresh" class="sub"></span>
+        <button class="btn" id="refreshBtn">Refresh</button>
+        <label class="toggle"><input type="checkbox" id="autoRefresh" checked/> Auto</label>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card col-6">
+        <h3>Core</h3>
+        <table class="kv">
+          <tr><td>UTC time</td><td id="utc_time">—</td></tr>
+          <tr><td>DB file</td><td id="db_file">—</td></tr>
+          <tr><td>Trading mode (effective)</td><td id="trade_mode">—</td></tr>
+          <tr><td>Env</td><td id="env_summary">—</td></tr>
+        </table>
+      </div>
+
+      <div class="card col-6">
+        <div class="card-head">
+          <h3>Components</h3>
+          <div class="muted" id="comp_hint"></div>
+        </div>
+        <div class="list" id="components"></div>
+      </div>
+
+      <div class="card col-12">
+        <h3>Warnings</h3>
+        <div class="muted">If something looks off, it will show up here.</div>
+        <div id="warnings_box"></div>
+      </div>
+
+      <div class="card col-6">
+        <h3>Rate limits & latency</h3>
+        <div class="muted">REST health. Helps avoid bans / slowdowns.</div>
+        <table class="kv">
+          <tr><td>Endpoint</td><td id="api_endpoint">—</td></tr>
+          <tr><td>Last status</td><td id="api_last_status">—</td></tr>
+          <tr><td>Used weight (1m)</td><td id="api_weight">—</td></tr>
+          <tr><td>Latency</td><td id="api_latency">—</td></tr>
+          <tr><td>Last check</td><td id="api_last_check">—</td></tr>
+          <tr><td>Last error</td><td id="api_last_error">—</td></tr>
+        </table>
+        <div class="muted" style="margin-top:10px;">Latency history (latest last)</div>
+        <pre class="json" id="api_latency_history">{}</pre>
+      </div>
+
+      <div class="card col-6">
+        <h3>ExecMon REST metrics</h3>
+        <div class="muted">Execution monitor API health & errors.</div>
+        <pre class="json" id="execmon_api_pre">{}</pre>
+      </div>
+
+      <div class="card col-12" id="card_protection">
+        <div class="card-head">
+          <h3>Protection audit & orphan orders</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="protection_pre">Copy</button>
+            <button class="btn mini" id="btn_protection_force">Run audit now</button>
+            <button class="btn mini" id="btn_orphan_cleanup_force">Clean orphan orders</button>
+            <button class="btn mini" data-expand="card_protection">Expand</button>
+          </div>
+        </div>
+        <div class="muted">Verifies SL/TP/Trailing exist on exchange. Detects orphan protective orders (leftovers).</div>
+        <pre class="json" id="protection_pre">{}</pre>
+      </div>
+
+      <div class="card col-12" id="card_positions">
+        <div class="card-head">
+          <h3>Positions</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="positions_pre">Copy</button>
+            <button class="btn mini" data-expand="card_positions">Expand</button>
+          </div>
+        </div>
+        <div class="muted">DB open trades + exchange snapshot (from Execution Monitor).</div>
+        <pre class="json" id="positions_pre">{}</pre>
+      </div>
+
+      <div class="card col-6" id="card_ws">
+        <div class="card-head">
+          <h3>Futures WS status</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="ws_pre">Copy</button>
+            <button class="btn mini" data-expand="card_ws">Expand</button>
+          </div>
+        </div>
+        <pre class="json" id="ws_pre">{}</pre>
+      </div>
+
+      <div class="card col-6" id="card_models">
+        <div class="card-head">
+          <h3>Models status</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="models_pre">Copy</button>
+            <button class="btn mini" data-expand="card_models">Expand</button>
+          </div>
+        </div>
+        <pre class="json" id="models_pre">{}</pre>
+      </div>
+
+      <div class="card col-12">
+        <h3>Strategy decision trace (recent)</h3>
+        <div class="muted">Shows why the bot decided WAIT/NO_TRADE. Default: saves only WAIT/NO_TRADE.</div>
+        <div id="trace_table"></div>
+      </div>
+
+      <div class="card col-12" id="card_settings">
+        <div class="card-head">
+          <h3>Current settings (key subset)</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="settings_pre">Copy</button>
+            <button class="btn mini" data-expand="card_settings">Expand</button>
+          </div>
+        </div>
+        <pre class="json" id="settings_pre">{}</pre>
+      </div>
+
+      <div class="card col-12" id="card_all_settings">
+        <div class="card-head">
+          <h3>All DB settings</h3>
+          <div class="card-actions">
+            <button class="btn mini" data-copy="all_settings_pre">Copy</button>
+            <button class="btn mini" data-expand="card_all_settings">Expand</button>
+          </div>
+        </div>
+        <pre class="json" id="all_settings_pre">{}</pre>
+      </div>
+
+    </div>
+  </div>
+
+<script>
+  function pill(ok, text){
+    const cls = ok === true ? "pill ok" : (ok === false ? "pill bad" : "pill warn");
+    return `<span class="${cls}">${text}</span>`;
+  }
+
+  function compRow(name, ok, age, extra){
+    const status = ok === true ? pill(true, "OK") : (ok === false ? pill(false, "BAD") : pill(null, "N/A"));
+    const ageTxt = (age === null || age === undefined) ? "" : ` · age: ${age}s`;
+    const meta = extra ? ` · ${extra}` : "";
+    return `
+      <div class="comp">
+        <div class="left">
+          <div class="name">${name}</div>
+          ${status}
+          <div class="meta">${ageTxt}${meta}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function setText(id, value){
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.textContent = (value === null || value === undefined || value === "") ? "—" : String(value);
+  }
+
+  function setJSON(id, obj){
+    const el = document.getElementById(id);
+    if(!el) return;
+    try{
+      el.textContent = JSON.stringify(obj ?? {}, null, 2);
+    }catch(e){
+      el.textContent = String(obj);
+    }
+  }
+
+  function renderWarnings(warnings){
+    const box = document.getElementById("warnings_box");
+    if(!box) return;
+    const arr = Array.isArray(warnings) ? warnings : [];
+    if(arr.length === 0){
+      box.innerHTML = `<div class="muted">No warnings 🎉</div>`;
+      return;
+    }
+    box.innerHTML = `<ul class="warnings">${arr.map(w => `<li>${escapeHtml(String(w))}</li>`).join("")}</ul>`;
+  }
+
+  function escapeHtml(s){
+    return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  }
+
+  function renderTraces(traces){
+    const host = document.getElementById("trace_table");
+    if(!host) return;
+    const arr = Array.isArray(traces) ? traces : [];
+    if(arr.length === 0){
+      host.innerHTML = `<div class="muted">No traces yet. (Wait/NO_TRADE traces appear after the bot evaluates symbols.)</div>`;
+      return;
+    }
+    const rows = arr.slice(0, 50).map(t => {
+      const created = t.created_at_utc || t.created_utc || t.time_utc || "";
+      const symbol = t.symbol || "";
+      const interval = t.interval || "";
+      const decision = t.decision || "";
+      const conf = (t.conf_pct ?? t.confidence ?? "");
+      const minConf = (t.min_conf ?? "");
+      const score = (t.final_score ?? t.score ?? "");
+      const reason = t.reason || t.gate || (t.trace && t.trace.reason) || "";
+      return `
+        <tr>
+          <td>${escapeHtml(String(created))}</td>
+          <td><b>${escapeHtml(String(symbol))}</b></td>
+          <td>${escapeHtml(String(interval))}</td>
+          <td>${escapeHtml(String(decision))}</td>
+          <td>${escapeHtml(String(conf))}</td>
+          <td>${escapeHtml(String(minConf))}</td>
+          <td>${escapeHtml(String(score))}</td>
+          <td class="reason">${escapeHtml(String(reason))}</td>
+        </tr>
+      `;
+    }).join("");
+    host.innerHTML = `
+      <table class="trace">
+        <thead>
+          <tr>
+            <th>UTC</th><th>Symbol</th><th>TF</th><th>Decision</th><th>Conf</th><th>Min</th><th>Score</th><th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  let _timer = null;
+
+  async function loadDoctor(){
+    const refreshLabel = document.getElementById("last_refresh");
+    if(refreshLabel) refreshLabel.textContent = "Refreshing…";
+    try{
+      const [rDoctor, rSettings] = await Promise.all([
+        fetch("/api/doctor", {cache:"no-store"}),
+        fetch("/api/settings", {cache:"no-store"}).catch(() => null),
+      ]);
+      const data = await rDoctor.json();
+
+      const comps = data.components || {};
+      const db = data.db || {};
+      const overallOk = !!data.ok && !!(comps.bot && comps.bot.ok) && !!(comps.execution_monitor && comps.execution_monitor.ok);
+      document.getElementById("overall").outerHTML = pill(overallOk, overallOk ? "ALL GOOD" : "NEEDS ATTENTION");
+
+      // core
+      setText("utc_time", data.time_utc || "—");
+      setText("db_file", db.file || "—");
+      setText("trade_mode", (data.effective && data.effective.trading_mode) ? data.effective.trading_mode : "—");
+
+      const env = data.env || {};
+      const envBits = [];
+      if(env.use_testnet !== undefined) envBits.push(`USE_TESTNET=${env.use_testnet}`);
+      if(env.paper_trading !== undefined) envBits.push(`PAPER_TRADING=${env.paper_trading}`);
+      if(env.binance_key_present !== undefined) envBits.push(`API_KEY=${env.binance_key_present ? "SET" : "MISSING"}`);
+      setText("env_summary", envBits.length ? envBits.join(" · ") : "—");
+
+      // components list
+      const compHost = document.getElementById("components");
+      if(compHost){
+        compHost.innerHTML =
+          compRow("DB", !!db.ok, null, db.file || "") +
+          compRow("Bot (main.py)", comps.bot?.ok, comps.bot?.age_sec, comps.bot?.last_utc || "") +
+          compRow("Execution Monitor", comps.execution_monitor?.ok, comps.execution_monitor?.age_sec, comps.execution_monitor?.last_utc || "") +
+          compRow("Pump Hunter", comps.pump_hunter?.ok, comps.pump_hunter?.age_sec, "") +
+          compRow("Risk Supervisor", comps.risk_supervisor?.ok, comps.risk_supervisor?.age_sec, (comps.risk_supervisor?.last_error ? "has error" : "")) +
+          compRow("Data Manager", comps.data_manager?.ok, comps.data_manager?.age_sec, (comps.data_manager?.last_error ? "has error" : ""));
+      }
+
+      // warnings
+      renderWarnings(data.warnings || []);
+
+      // metrics
+      const m = data.metrics || {};
+      setText("api_endpoint", m.api_endpoint);
+      setText("api_last_status", m.api_last_status);
+      setText("api_weight", m.api_used_weight_1m);
+      setText("api_latency", (m.api_latency_ms !== undefined && m.api_latency_ms !== null) ? `${m.api_latency_ms} ms` : "—");
+      setText("api_last_check", m.api_last_check_utc);
+      setText("api_last_error", m.api_last_error);
+      setJSON("api_latency_history", m.api_latency_history || []);
+      setJSON("execmon_api_pre", m.execmon_api || {});
+
+      // big blocks
+      setJSON("protection_pre", data.protection_audit || {});
+      setJSON("positions_pre", data.positions || {});
+      setJSON("ws_pre", data.ws || {});
+      setJSON("models_pre", data.models || {});
+
+      renderTraces(data.decision_traces_recent || []);
+
+      // settings subset + all settings
+      setJSON("settings_pre", data.settings || {});
+      setJSON("all_settings_pre", data.settings_all || {});
+
+      // If /api/settings exists, show it inside all_settings_pre as well (helps verify).
+      if(rSettings && rSettings.ok){
+        const settingsData = await rSettings.json();
+        // If doctor already returns settings_all, keep it; otherwise override.
+        if(!data.settings_all || Object.keys(data.settings_all || {}).length === 0){
+          setJSON("all_settings_pre", settingsData || {});
+        }
+      }
+
+      if(refreshLabel) refreshLabel.textContent = `Last refresh: ${new Date().toLocaleTimeString()}`;
+    }catch(e){
+      document.getElementById("overall").outerHTML = pill(false, "ERROR");
+      renderWarnings([String(e)]);
+      if(refreshLabel) refreshLabel.textContent = "";
+    }
+  }
+
+  function setAuto(on){
+    const auto = document.getElementById("autoRefresh");
+    if(auto) auto.checked = !!on;
+    if(_timer) clearInterval(_timer);
+    _timer = null;
+    if(on){
+      _timer = setInterval(loadDoctor, 3000);
+    }
+  }
+
+  document.getElementById("refreshBtn").addEventListener("click", loadDoctor);
+  document.getElementById("autoRefresh").addEventListener("change", (e) => setAuto(e.target.checked));
+
+  // Force protection audit now (execution_monitor will pick it up)
+  const btnProt = document.getElementById("btn_protection_force");
+  if(btnProt){
+    btnProt.addEventListener("click", async () => {
+      const old = btnProt.textContent;
+      btnProt.disabled = true;
+      btnProt.textContent = "Running...";
+      try{
+        await fetch("/api/protection/force", { method: "POST" });
+      }catch(_){
+        // ignore
+      }
+      // give execmon a moment to run on next cycle; then refresh
+      try{ await new Promise(r => setTimeout(r, 300)); }catch(_){ }
+      await loadDoctor();
+      btnProt.textContent = old;
+      btnProt.disabled = false;
+    });
+  }
+
+  // Force orphan cleanup now (execution_monitor will pick it up)
+  const btnClean = document.getElementById("btn_orphan_cleanup_force");
+  if(btnClean){
+    btnClean.addEventListener("click", async () => {
+      const old = btnClean.textContent;
+      btnClean.disabled = true;
+      btnClean.textContent = "Cleaning...";
+      try{
+        await fetch("/api/protection/orphans/cleanup", { method: "POST" });
+      }catch(_){
+        // ignore
+      }
+      setTimeout(() => {
+        btnClean.disabled = false;
+        btnClean.textContent = old;
+      }, 1500);
+    });
+  }
+
+  // Copy / expand handlers
+  document.addEventListener("click", async (e) => {
+    const copyId = e.target?.getAttribute?.("data-copy");
+    if(copyId){
+      const el = document.getElementById(copyId);
+      if(el){
+        try{
+          await navigator.clipboard.writeText(el.textContent || "");
+          e.target.textContent = "Copied";
+          setTimeout(() => e.target.textContent = "Copy", 800);
+        }catch(_){}
+      }
+    }
+    const expId = e.target?.getAttribute?.("data-expand");
+    if(expId){
+      const card = document.getElementById(expId);
+      if(card){
+        card.classList.toggle("expanded");
+        e.target.textContent = card.classList.contains("expanded") ? "Collapse" : "Expand";
+      }
+    }
+  });
+
+  // initial
+  loadDoctor();
+  setAuto(true);
+</script>
+</body>
+</html>

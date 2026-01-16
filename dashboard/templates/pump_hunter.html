@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradePro | Pump Hunter</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --accent:#ffd700; --border:#30363d; --text:#c9d1d9; --muted:#8b949e; --ok:#2ea043; --bad:#da3633; --warn:#d29922; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin:0; padding:20px; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    .header { display:flex; justify-content:space-between; align-items:center; gap:12px; border-bottom:1px solid var(--border); padding-bottom:15px; }
+    .header h1 { margin:0; color: var(--accent); font-size:1.6rem; display:flex; align-items:center; gap:10px; }
+    .btn { background: var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:10px; cursor:pointer; }
+    .btn:hover{ border-color: var(--accent); }
+    .btn-ok{ background: rgba(46,160,67,0.15); border-color: rgba(46,160,67,0.35); }
+    .btn-bad{ background: rgba(218,54,51,0.12); border-color: rgba(218,54,51,0.35); }
+    .grid{ display:grid; grid-template-columns: 1fr 2fr; gap: 16px; margin-top:16px; }
+    .panel{ background: var(--panel); border:1px solid var(--border); border-radius:14px; padding:14px; }
+    .panel h3{ margin:0 0 10px 0; font-size:1.05rem; color:var(--accent); display:flex; align-items:center; gap:10px;}
+    .kv{ display:grid; grid-template-columns: 170px 1fr; gap:8px; font-size:0.92rem; }
+    .muted{ color: var(--muted); }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .input{ background:#0b1320; border:1px solid var(--border); color:var(--text); padding:8px 10px; border-radius:10px; min-width: 140px; }
+    table{ width:100%; border-collapse: collapse; }
+    th,td{ padding:10px; border-bottom:1px solid var(--border); text-align:left; font-size:0.92rem; }
+    th{ color: var(--muted); font-weight:600; }
+    .tag{ display:inline-block; padding:2px 8px; border-radius: 999px; border:1px solid var(--border); font-size:0.82rem; color: var(--muted); }
+    .ok{ color: var(--ok); }
+    .bad{ color: var(--bad); }
+    .warn{ color: var(--warn); }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1><i class="fa-solid fa-bolt"></i> Pump Hunter</h1>
+    <div class="row">
+      <button class="btn" onclick="location.href='/'"><i class="fa-solid fa-arrow-left"></i> Dashboard</button>
+      <button class="btn" onclick="refreshAll()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h3><i class="fa-solid fa-satellite-dish"></i> Status</h3>
+      <div class="kv">
+        <div class="muted">Pump Hunter</div><div id="ph-running" class="tag">Loading...</div>
+        <div class="muted">Last Heartbeat</div><div id="ph-hb">—</div>
+        <div class="muted">Last Scan</div><div id="ph-scan">—</div>
+        <div class="muted">Last Scan Count</div><div id="ph-count">—</div>
+        <div class="muted">Last Error</div><div id="ph-error" class="muted">—</div>
+      </div>
+
+      <hr style="border:0;border-top:1px solid var(--border); margin:14px 0;">
+
+      <h3><i class="fa-solid fa-sliders"></i> Pump Hunter Settings</h3>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-enabled" placeholder="pump_hunter_enabled (TRUE/FALSE)">
+        <input class="input" id="s-market" placeholder="market (futures/spot)">
+        <input class="input" id="s-interval" placeholder="interval (1m/3m/5m)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-topn" placeholder="top_n (120)">
+        <input class="input" id="s-scansec" placeholder="scan_sec (20)">
+        <input class="input" id="s-maxscan" placeholder="max_per_scan (8)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-minpump" placeholder="min pump_score (65)">
+        <input class="input" id="s-minconf" placeholder="min AI conf % (65)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-allowweak" placeholder="allow_ai_weak (TRUE/FALSE)">
+        <input class="input" id="s-mirror" placeholder="mirror_inbox (TRUE/FALSE)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-oimin" placeholder="min OI change (0.02)">
+        <input class="input" id="s-fundmax" placeholder="funding max abs (0.0005)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="s-exit" placeholder="exit_profile (SCALP_PUMP)">
+        <input class="input" id="s-lev" placeholder="leverage (10)">
+      </div>
+      <hr style="border:0;border-top:1px solid var(--border); margin:14px 0;">
+      <h3><i class="fa-solid fa-bolt"></i> Dynamic Exit (Pump Capture)</h3>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="x-enabled" placeholder="pump_exit_enabled (TRUE/FALSE)">
+        <input class="input" id="x-useatr" placeholder="pump_exit_use_atr (TRUE/FALSE)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="x-be" placeholder="BE trigger ROI (0.004 = 0.4%)">
+        <input class="input" id="x-bebuf" placeholder="BE buffer (0.0004)">
+        <input class="input" id="x-trig" placeholder="Trail trigger ROI (0.007)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="x-atrmult" placeholder="Trail ATR mult (1.8)">
+        <input class="input" id="x-trailpct" placeholder="Trail pct (0.007)">
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <input class="input" id="x-retrace" placeholder="Exhaust retrace pct (0.012)">
+        <input class="input" id="x-minprofit" placeholder="Min profit for exhaust (0.006)">
+        <input class="input" id="x-maxm" placeholder="Timeout minutes (35)">
+      </div>
+      <div class="row">
+        <button class="btn btn-ok" onclick="saveSettings()"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+        <button class="btn" onclick="loadSettings()"><i class="fa-solid fa-download"></i> Load</button>
+        <button class="btn" onclick="reloadModels()"><i class="fa-solid fa-brain"></i> Reload AI Models</button>
+      </div>
+      <div id="settings-msg" class="muted" style="margin-top:10px;"></div>
+
+      <hr style="border:0;border-top:1px solid var(--border); margin:14px 0;">
+      <div class="muted" style="font-size:0.9rem;">
+        <div>✅ This page reads candidates written by <code>pump_hunter.py</code> into <code>bot_data.db</code>.</div>
+        <div>Approve → sends <code>EXECUTE_SIGNAL</code> to the bot command queue.</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-magnifying-glass-chart"></i> Candidates</h3>
+        <div class="row">
+          <select class="input" id="filter-status" onchange="loadCandidates()">
+            <option value="WATCH">WATCH</option>
+            <option value="PENDING">PENDING</option>
+            <option value="APPROVED">APPROVED</option>
+            <option value="REJECTED">REJECTED</option>
+            <option value="EXECUTED">EXECUTED</option>
+            <option value="">ALL</option>
+          </select>
+          <select class="input" id="filter-limit" onchange="loadCandidates()">
+            <option value="30">30</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time (UTC)</th>
+              <th>Symbol</th>
+              <th>Market</th>
+              <th>TF</th>
+              <th>Pump</th>
+              <th>AI Vote</th>
+              <th>AI Conf</th>
+              <th>Price</th>
+              <th>Funding</th>
+              <th>OI%</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="ph-body">
+            <tr><td colspan="12" class="muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="muted" id="ph-msg" style="margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function fmtUtc(ms){
+    if(!ms) return "—";
+    const d = new Date(ms);
+    // show as YYYY-MM-DD HH:MM:SS (UTC)
+    const pad = (n)=> String(n).padStart(2,"0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+  }
+
+  async function reloadModels(){
+    try{
+      await fetch('/api/command', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cmd:'RELOAD_MODELS', params:{}}) });
+      document.getElementById('settings-msg').textContent = "✅ RELOAD_MODELS queued.";
+    }catch(e){
+      document.getElementById('settings-msg').textContent = "❌ Failed to queue RELOAD_MODELS.";
+    }
+  }
+
+  async function loadStatus(){
+    try{
+      const res = await fetch('/api/pump/status');
+      const data = await res.json();
+      const st = data.state || {};
+      const now = Date.now();
+      const hb = parseInt(st.last_heartbeat_ms || 0);
+      const scan = parseInt(st.last_scan_ms || 0);
+      const hbAge = hb ? Math.max(0, Math.floor((now - hb)/1000)) : null;
+      const scanAge = scan ? Math.max(0, Math.floor((now - scan)/1000)) : null;
+
+      const run = (hb && hbAge !== null && hbAge < 25);
+      const tag = document.getElementById('ph-running');
+      tag.textContent = run ? "RUNNING" : "OFFLINE";
+      tag.className = "tag " + (run ? "ok" : "bad");
+
+      document.getElementById('ph-hb').textContent = hb ? `${fmtUtc(hb)}  (${hbAge}s ago)` : "—";
+      document.getElementById('ph-scan').textContent = scan ? `${fmtUtc(scan)}  (${scanAge}s ago)` : "—";
+      document.getElementById('ph-count').textContent = String(st.last_scan_count || "—");
+      document.getElementById('ph-error').textContent = (st.last_error || "—");
+    }catch(e){
+      document.getElementById('ph-running').textContent = "ERROR";
+    }
+  }
+
+  async function loadCandidates(){
+    const status = document.getElementById('filter-status').value;
+    const limit = document.getElementById('filter-limit').value;
+    const url = `/api/pump/candidates?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`;
+    const body = document.getElementById('ph-body');
+    body.innerHTML = `<tr><td colspan="12" class="muted">Loading...</td></tr>`;
+    try{
+      const res = await fetch(url);
+      const data = await res.json();
+      const items = data.items || [];
+      if(!items.length){
+        body.innerHTML = `<tr><td colspan="12" class="muted">No candidates.</td></tr>`;
+        return;
+      }
+      body.innerHTML = items.map(it=>{
+        const p = it.payload || {};
+        const t = fmtUtc(it.created_at_ms || 0);
+        const sym = it.symbol || p.symbol || "—";
+        const mk = it.market_type || p.market_type || "—";
+        const tf = it.interval || p.interval || "—";
+        const pump = (it.pump_score ?? p.pump_score ?? "—");
+        const vote = (it.ai_vote ?? p.ai_vote ?? p.side ?? p.signal ?? "—");
+        const conf = (it.ai_confidence ?? p.ai_confidence ?? p.confidence ?? "—");
+        const price = (it.price ?? p.entry_price ?? p.price ?? "—");
+        const fund = (it.funding ?? p.funding ?? "—");
+        const oi = (it.oi_change ?? p.oi_change ?? "—");
+        const st = it.status || "—";
+        const id = it.id;
+
+        const confNum = parseFloat(conf);
+        const confTxt = isFinite(confNum) ? (confNum>1 ? confNum.toFixed(1)+"%" : (confNum*100).toFixed(1)+"%") : "—";
+        const fundNum = parseFloat(fund);
+        const fundTxt = isFinite(fundNum) ? (fundNum*100).toFixed(4)+"%" : "—";
+        const oiNum = parseFloat(oi);
+        const oiTxt = isFinite(oiNum) ? (oiNum*100).toFixed(2)+"%" : "—";
+
+        const ST = String(st || "").toUpperCase();
+        const stClass = (ST==="WATCH" || ST==="PENDING") ? "warn" : (ST==="APPROVED" ? "ok" : (ST==="REJECTED" ? "bad" : "muted"));
+
+        const actions = (ST==="WATCH") ? `
+              <button class="btn btn-warn" onclick="promote(${id})" title="Promote WATCH → PENDING"><i class="fa-solid fa-arrow-up"></i></button>
+              <button class="btn btn-bad" onclick="reject(${id})" title="Reject"><i class="fa-solid fa-xmark"></i></button>
+            ` : (ST==="PENDING") ? `
+              <button class="btn btn-ok" onclick="approve(${id})" title="Approve"><i class="fa-solid fa-check"></i></button>
+              <button class="btn btn-bad" onclick="reject(${id})" title="Reject"><i class="fa-solid fa-xmark"></i></button>
+            ` : `
+              <span class="muted">—</span>
+            `;
+
+        return `
+          <tr>
+            <td class="muted">${t}</td>
+            <td><b>${sym}</b></td>
+            <td>${mk}</td>
+            <td>${tf}</td>
+            <td>${pump}</td>
+            <td>${vote}</td>
+            <td>${confTxt}</td>
+            <td>${Number(price).toFixed ? Number(price).toFixed(6) : price}</td>
+            <td class="muted">${fundTxt}</td>
+            <td class="muted">${oiTxt}</td>
+            <td class="${stClass}">${st}</td>
+            <td>${actions}</td>
+          </tr>
+        `;
+      }).join("");
+    }catch(e){
+      body.innerHTML = `<tr><td colspan="12" class="bad">Error loading candidates.</td></tr>`;
+    }
+  }
+
+  async function approve(id){
+    const note = prompt("Optional note for approval:", "") || "";
+    await fetch('/api/pump/candidates/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, note}) });
+    await refreshAll();
+  }
+  async function reject(id){
+    const note = prompt("Optional note for reject:", "") || "";
+    await fetch('/api/pump/candidates/reject', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, note}) });
+    await refreshAll();
+  }
+
+  async function promote(id){
+    const side = (prompt("Promote side (LONG/SHORT):", "LONG") || "LONG").toUpperCase();
+    const note = prompt("Optional note for promote:", "") || "";
+    await fetch('/api/pump/candidates/promote', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, side, note}) });
+    await refreshAll();
+  }
+
+  async function loadSettings(){
+    try{
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      const s = (data && (data.settings || data)) || {};
+      const g=(k,def)=> (s[k]!==undefined && s[k]!==null && String(s[k]).trim()!=="") ? String(s[k]) : def;
+      document.getElementById('s-enabled').value = g('pump_hunter_enabled','TRUE');
+      document.getElementById('s-market').value = g('pump_hunter_market','futures');
+      document.getElementById('s-interval').value = g('pump_hunter_interval','5m');
+      document.getElementById('s-topn').value = g('pump_hunter_top_n','120');
+      document.getElementById('s-scansec').value = g('pump_hunter_scan_sec','20');
+      document.getElementById('s-maxscan').value = g('pump_hunter_max_per_scan','8');
+      document.getElementById('s-minpump').value = g('pump_hunter_pump_score_min','65');
+      document.getElementById('s-minconf').value = g('pump_hunter_ai_conf_min','65');
+      document.getElementById('s-allowweak').value = g('pump_hunter_allow_ai_weak','TRUE');
+      document.getElementById('s-mirror').value = g('pump_hunter_mirror_inbox','TRUE');
+      document.getElementById('s-oimin').value = g('pump_hunter_oi_change_min','0.02');
+      document.getElementById('s-fundmax').value = g('pump_hunter_funding_max_abs','0.0005');
+      document.getElementById('s-exit').value = g('pump_hunter_exit_profile','SCALP_PUMP');
+      document.getElementById('s-lev').value = g('pump_hunter_leverage','10');
+      document.getElementById('x-enabled').value = g('pump_exit_enabled','TRUE');
+      document.getElementById('x-useatr').value = g('pump_exit_use_atr','TRUE');
+      document.getElementById('x-be').value = g('pump_exit_be_trigger_roi','0.004');
+      document.getElementById('x-bebuf').value = g('pump_exit_be_buffer_pct','0.0004');
+      document.getElementById('x-trig').value = g('pump_exit_trail_trigger_roi','0.007');
+      document.getElementById('x-atrmult').value = g('pump_exit_trail_atr_mult','1.8');
+      document.getElementById('x-trailpct').value = g('pump_exit_trail_pct','0.007');
+      document.getElementById('x-retrace').value = g('pump_exit_retrace_pct','0.012');
+      document.getElementById('x-minprofit').value = g('pump_exit_min_profit_for_exhaust','0.006');
+      document.getElementById('x-maxm').value = g('pump_exit_max_minutes','35');
+      document.getElementById('settings-msg').textContent = "✅ Loaded from DB.";
+    }catch(e){
+      document.getElementById('settings-msg').textContent = "❌ Failed loading settings.";
+    }
+  }
+
+  async function saveSettings(){
+    const payload = {
+      pump_hunter_enabled: document.getElementById('s-enabled').value || "TRUE",
+      pump_hunter_market: document.getElementById('s-market').value || "futures",
+      pump_hunter_interval: document.getElementById('s-interval').value || "5m",
+      pump_hunter_top_n: document.getElementById('s-topn').value || "120",
+      pump_hunter_scan_sec: document.getElementById('s-scansec').value || "20",
+      pump_hunter_max_per_scan: document.getElementById('s-maxscan').value || "8",
+      pump_hunter_pump_score_min: document.getElementById('s-minpump').value || "65",
+      pump_hunter_ai_conf_min: document.getElementById('s-minconf').value || "65",
+      pump_hunter_allow_ai_weak: document.getElementById('s-allowweak').value || "TRUE",
+      pump_hunter_mirror_inbox: document.getElementById('s-mirror').value || "TRUE",
+      pump_hunter_oi_change_min: document.getElementById('s-oimin').value || "0.02",
+      pump_hunter_funding_max_abs: document.getElementById('s-fundmax').value || "0.0005",
+      pump_hunter_exit_profile: document.getElementById('s-exit').value || "SCALP_PUMP",
+            pump_hunter_leverage: document.getElementById('s-lev').value || "10",
+      pump_exit_enabled: document.getElementById('x-enabled')?.value || "TRUE",
+      pump_exit_use_atr: document.getElementById('x-useatr')?.value || "TRUE",
+      pump_exit_be_trigger_roi: document.getElementById('x-be')?.value || "0.004",
+      pump_exit_be_buffer_pct: document.getElementById('x-bebuf')?.value || "0.0004",
+      pump_exit_trail_trigger_roi: document.getElementById('x-trig')?.value || "0.007",
+      pump_exit_trail_atr_mult: document.getElementById('x-atrmult')?.value || "1.8",
+      pump_exit_trail_pct: document.getElementById('x-trailpct')?.value || "0.007",
+      pump_exit_retrace_pct: document.getElementById('x-retrace')?.value || "0.012",
+      pump_exit_min_profit_for_exhaust: document.getElementById('x-minprofit')?.value || "0.006",
+      pump_exit_max_minutes: document.getElementById('x-maxm')?.value || "35"
+    };
+    try{
+      await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      document.getElementById('settings-msg').textContent = "✅ Saved.";
+      await loadSettings();
+    }catch(e){
+      document.getElementById('settings-msg').textContent = "❌ Save failed.";
+    }
+  }
+
+  async function refreshAll(){
+    await loadStatus();
+    await loadCandidates();
+  }
+
+  window.addEventListener('load', async ()=>{
+    await loadSettings();
+    await refreshAll();
+    setInterval(loadStatus, 5000);
+  });
+</script>
+</body>
+</html>

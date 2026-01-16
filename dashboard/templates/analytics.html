@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradePro Analytics | Neural Hub</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --bg: #0d1117; --panel: #161b22; --accent: #ffd700; --border: #30363d; --text: #c9d1d9; --win: #2ea043; --loss: #da3633; }
+        body { background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        /* Header & Nav */
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 1px solid var(--border); padding-bottom: 15px; }
+        .header h1 { margin: 0; color: var(--accent); font-size: 1.6rem; display: flex; align-items: center; gap: 10px; }
+        .nav-group { display: flex; gap: 10px; }
+        .btn { padding: 8px 16px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 8px; border: none; cursor: pointer; transition: 0.3s; }
+        .btn-back { background: #333; color: #fff; }
+        .btn-audit { background: var(--accent); color: #000; }
+        .btn:hover { opacity: 0.8; transform: translateY(-2px); }
+
+        /* Stats Cards */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .card { background: var(--panel); padding: 15px; border-radius: 10px; border: 1px solid var(--border); text-align: center; }
+        .card h3 { margin: 0; font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+        .card .value { font-size: 1.5rem; font-weight: bold; margin-top: 8px; color: #fff; }
+
+        /* Charts Layout - Compact Grid */
+        .main-charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 25px; }
+        .panel { background: var(--panel); padding: 15px; border-radius: 10px; border: 1px solid var(--border); }
+        .panel h3 { margin-top: 0; font-size: 0.9rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 12px; }
+        
+        .chart-container-small { position: relative; height: 200px; width: 100%; }
+        .chart-container-med { position: relative; height: 250px; width: 100%; }
+
+        /* Trade Journal */
+        .journal-container { background: var(--panel); padding: 20px; border-radius: 10px; border: 1px solid var(--border); overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th { text-align: left; color: #8b949e; padding: 12px; border-bottom: 2px solid var(--border); text-transform: uppercase; }
+        td { padding: 12px; border-bottom: 1px solid #21262d; }
+        .green { color: var(--win); font-weight: bold; }
+        .red { color: var(--loss); font-weight: bold; }
+        .badge { background: #21262d; padding: 3px 8px; border-radius: 10px; font-size: 0.7rem; color: #8b949e; }
+        
+        #loading { text-align: center; color: var(--accent); margin-top: 80px; font-weight: bold; }
+        ul#insightsList { padding-left: 20px; font-size: 0.85rem; color: #bbb; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fa-solid fa-chart-line"></i> TradePro Intelligence Hub</h1>
+            <div class="nav-group">
+                <a href="/audit" class="btn btn-audit"><i class="fa-solid fa-microscope"></i> Deep Audit Lab</a>
+                <a href="/" class="btn btn-back"><i class="fa-solid fa-arrow-left"></i> Dashboard</a>
+            <div id="statusBar" style="display:flex; justify-content:space-between; align-items:center; margin: 10px 0 20px 0; color:#8b949e; font-size:0.85rem;">
+    <div>Last updated (UTC): <span id="lastUpdated">--</span></div>
+    <button id="refreshBtn" class="btn btn-back" style="padding:6px 12px;"><i class="fa-solid fa-rotate"></i> Refresh</button>
+</div>
+</div>
+        </div>
+
+        <div id="loading">🚀 Syncing Neural Performance Data...</div>
+
+        <div id="content" style="display: none;">
+            <div class="stats-grid">
+                <div class="card"><h3>Total Rejections</h3><div class="value" id="totalRejections">0</div></div>
+                <div class="card"><h3>Best Trading Hour</h3><div class="value" id="bestHour" style="color:var(--accent)">--:--</div></div>
+                <div class="card"><h3>Success Rate</h3><div class="value" id="successRate">0%</div></div>
+                <div class="card"><h3>Market Status</h3><div class="value" id="marketStatus">---</div></div>
+            </div>
+
+            <div class="main-charts-grid">
+                <div class="panel">
+                    <h3>🚫 Rejection Logic (Why Bot Says NO?)</h3>
+                    <div class="chart-container-small"><canvas id="rejectionChart"></canvas></div>
+                </div>
+                <div class="panel">
+                    <h3>⏰ Golden Hours (Profit Heatmap UTC)</h3>
+                    <div class="chart-container-small"><canvas id="goldenChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="main-charts-grid">
+                <div class="panel">
+                    <h3>🧠 AI Confidence vs. Reality</h3>
+                    <div class="chart-container-med"><canvas id="calibrationChart"></canvas></div>
+                </div>
+                <div class="panel">
+                    <h3>💡 Neural Insights</h3>
+                    <ul id="insightsList"></ul>
+                </div>
+            </div>
+
+            <div class="journal-container">
+                <h3><i class="fa-solid fa-history"></i> Recent Trade Journal (Last 50)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Close Time</th><th>Symbol</th><th>Side</th><th>AI Score</th>
+                            <th>Entry</th><th>Exit</th><th>PnL ($)</th><th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        
+async function loadData() {
+    const loadingEl = document.getElementById('loading');
+    const contentEl = document.getElementById('content');
+    const lastUpdatedEl = document.getElementById('lastUpdated');
+
+    function num(x, d = 0) {
+        const v = parseFloat(x);
+        return Number.isFinite(v) ? v : d;
+    }
+
+    try {
+        loadingEl.style.display = 'block';
+        contentEl.style.display = 'none';
+
+        const res = await fetch('/api/analytics', { credentials: 'include' });
+
+        if (res.status === 401) {
+            loadingEl.innerHTML = `<div style="color:var(--loss)">🔒 Unauthorized. Please <a href="/login" style="color:var(--accent); text-decoration:underline;">login</a> then refresh.</div>`;
+            return;
+        }
+
+        if (!res.ok) throw new Error("Sync Failed");
+
+        const data = await res.json();
+        if (data?.generated_at) lastUpdatedEl.innerText = data.generated_at.substring(0, 16).replace('T', ' ');
+
+        // 1) Update KPIs
+        const rejections = Array.isArray(data.rejections) ? data.rejections : [];
+        const totalRej = rejections.reduce((a, b) => a + num(b.count, 0), 0);
+        document.getElementById('totalRejections').innerText = totalRej;
+
+        const golden = Array.isArray(data.golden_hours) ? data.golden_hours : [];
+        if (golden.length > 0) {
+            const best = golden.reduce((p, c) => (num(p.total_pnl, -1e18) > num(c.total_pnl, -1e18)) ? p : c);
+            document.getElementById('bestHour').innerText = (best.hour || "00") + ":00";
+        } else {
+            document.getElementById('bestHour').innerText = "--:--";
+        }
+
+        const trades = Array.isArray(data.recent_trades) ? data.recent_trades : [];
+        const wins = trades.filter(t => num(t.pnl, 0) > 0).length;
+        const winRateStr = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(1) + "%" : "0%";
+        document.getElementById('successRate').innerText = winRateStr;
+
+        const lowVol = rejections.find(r => String(r.reason || '').toUpperCase().includes('VOLATILITY'));
+        document.getElementById('marketStatus').innerHTML =
+            (lowVol && num(lowVol.count, 0) > totalRej * 0.5)
+                ? "<span style='color:orange'>😴 SLEEPY</span>"
+                : "<span class='green'>⚡ ACTIVE</span>";
+
+        // 2) Charts
+        // Destroy existing charts if this function runs again
+        if (window.__charts) { window.__charts.forEach(ch => { try { ch.destroy(); } catch(e){} }); }
+        window.__charts = [];
+
+        const rejCtx = document.getElementById('rejectionChart');
+        if (rejCtx) {
+            window.__charts.push(new Chart(rejCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: rejections.map(d => d.reason || 'UNKNOWN'),
+                    datasets: [{
+                        data: rejections.map(d => num(d.count, 0)),
+                        backgroundColor: ['#f85149', '#58a6ff', '#f1e05a', '#3fb950', '#bc8cff', '#ffa657', '#8b949e'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right', labels: { color: '#8b949e', font: { size: 10 } } }
+                    }
+                }
+            }));
+        }
+
+        const goldCtx = document.getElementById('goldenChart');
+        if (goldCtx) {
+            window.__charts.push(new Chart(goldCtx, {
+                type: 'bar',
+                data: {
+                    labels: golden.map(d => (d.hour || '00') + ':00'),
+                    datasets: [{
+                        label: 'PnL',
+                        data: golden.map(d => num(d.total_pnl, 0)),
+                        backgroundColor: golden.map(d => num(d.total_pnl, 0) >= 0 ? '#2ea043' : '#da3633'),
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { grid: { color: '#30363d' }, ticks: { font: { size: 9 } } },
+                        x: { grid: { display: false }, ticks: { font: { size: 9 } } }
+                    }
+                }
+            }));
+        }
+
+        const calibration = Array.isArray(data.calibration) ? data.calibration : [];
+        const calCtx = document.getElementById('calibrationChart');
+        if (calCtx && calibration.length > 0) {
+            window.__charts.push(new Chart(calCtx, {
+                type: 'bar',
+                data: {
+                    labels: calibration.map(d => d.bucket || ''),
+                    datasets: [{
+                        label: 'Win Rate %',
+                        data: calibration.map(d => {
+                            const total = num(d.total_trades, 0);
+                            const wins = num(d.wins, 0);
+                            return total > 0 ? +(wins / total * 100).toFixed(1) : 0;
+                        }),
+                        backgroundColor: '#1f6feb'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { max: 100, ticks: { font: { size: 9 } } },
+                        x: { ticks: { font: { size: 9 } } }
+                    }
+                }
+            }));
+        }
+
+        // 3) Fill Table
+        const tbody = document.getElementById('tradesTableBody');
+        tbody.innerHTML = "";
+        trades.slice(0, 50).forEach(t => {
+            const pnl = num(t.pnl, 0);
+            const time = t.closed_at ? String(t.closed_at).substring(5, 16).replace('T', ' ') : '---';
+            const signal = String(t.signal || '');
+            const conf = num(t.confidence, 0);
+            const entry = num(t.entry_price, 0);
+            const exitp = num(t.close_price, 0);
+
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr>
+                    <td style="color:#8b949e">${time}</td>
+                    <td style="font-weight:bold">${t.symbol || ''}</td>
+                    <td class="${signal.includes('LONG') ? 'green' : 'red'}">${signal || '-'}</td>
+                    <td style="color:var(--accent)">${conf.toFixed(1)}%</td>
+                    <td>$${entry.toFixed(4)}</td>
+                    <td>$${exitp.toFixed(4)}</td>
+                    <td class="${pnl >= 0 ? 'green' : 'red'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</td>
+                    <td><span class="badge">${t.close_reason || 'CLOSED'}</span></td>
+                </tr>`);
+        });
+
+        // 4) Insights
+        const list = document.getElementById('insightsList');
+        list.innerHTML = "";
+        if (totalRej > 100) list.innerHTML += `<li>⚠️ Bot filters are strict: <b>${totalRej}</b> signals blocked to protect capital.</li>`;
+        if (trades.length > 0) list.innerHTML += `<li>🧠 Closed-trades accuracy snapshot: <b>${winRateStr}</b> win-rate on last ${Math.min(trades.length, 50)} trades.</li>`;
+        if (lowVol) list.innerHTML += `<li>📉 Low volatility detected (by rejections). Bot is currently in <b>Conservative Mode</b>.</li>`;
+        if (data?.errors && Object.keys(data.errors).length > 0) {
+            list.innerHTML += `<li>🧩 Partial data: some analytics queries failed (see console).</li>`;
+            console.warn("Analytics endpoint errors:", data.errors);
+        }
+
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('content').style.display = 'block';
+
+    } catch (e) {
+        console.error("UI Sync Error:", e);
+        document.getElementById('loading').innerHTML = `<div style="color:var(--loss)">🛑 Neural Sync Failed. Please check server.</div>`;
+    }
+}
+
+window.onload = () => {
+    const btn = document.getElementById('refreshBtn');
+    if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); loadData(); });
+
+    loadData();
+    // Auto-refresh every 60 seconds
+    setInterval(loadData, 60000);
+};
+
+    </script>
+</body>
+</html>

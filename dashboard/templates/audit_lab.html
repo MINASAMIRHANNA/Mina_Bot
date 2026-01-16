@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradePro | Deep Audit Lab</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root { --bg: #0d1117; --panel: #161b22; --accent: #ffd700; --border: #30363d; --text: #c9d1d9; }
+        body { background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 1300px; margin: 0 auto; }
+        .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px solid var(--border); padding-bottom: 15px; }
+        .nav h1 { color: var(--accent); margin: 0; font-size: 1.5rem; }
+        .audit-controls { background: var(--panel); padding: 25px; border-radius: 12px; border: 1px solid var(--border); display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; align-items: flex-end; margin-bottom: 30px; }
+        .input-group { display: flex; flex-direction: column; gap: 8px; }
+        .input-group label { font-size: 0.75rem; color: #8b949e; font-weight: bold; text-transform: uppercase; }
+        .dark-input { background: #0d1117; color: #f0f6fc; border: 1px solid var(--border); padding: 12px; border-radius: 6px; outline: none; font-size: 0.85rem; }
+        .btn-run { background: var(--accent); color: #000; border: none; padding: 12px 30px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn-run:hover { background: #fff; transform: translateY(-2px); }
+        .results-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; display: none; }
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+        .panel h3 { margin-top: 0; font-size: 1rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 15px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th { text-align: left; color: #8b949e; padding: 12px; border-bottom: 2px solid var(--border); }
+        td { padding: 12px; border-bottom: 1px solid #21262d; }
+        .avg-row { background: rgba(255, 215, 0, 0.05); font-weight: bold; color: var(--accent); border-top: 2px solid var(--accent); }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+        .badge-open { background: #1b4332; color: #7ee787; }
+        .badge-closed { background: #490202; color: #ff7b72; }
+        .match-card { background: #0d1117; padding: 15px; border-radius: 8px; border-left: 4px solid var(--accent); margin-bottom: 15px; }
+        
+        /* New Recommendation Section */
+        #recommendationArea { margin-top: 25px; border: 1px solid var(--accent); display: none; }
+        .rec-suggested { color: var(--accent); font-weight: bold; }
+        .rec-reason { font-size: 0.8rem; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <h1><i class="fa-solid fa-microscope"></i> Deep Audit Lab</h1>
+            <a href="/analytics" style="color:var(--text); text-decoration:none;"><i class="fa-solid fa-arrow-left"></i> Back to Analytics</a>
+        </div>
+
+        <div class="audit-controls">
+            <div class="input-group"><label>Symbol</label><input type="text" id="symbol" class="dark-input" value="BTCUSDT"></div>
+            <div class="input-group"><label>Timeframe</label><select id="interval" class="dark-input"><option value="5m">5m</option><option value="15m">15m</option><option value="1h">1h</option></select></div>
+            <div class="input-group"><label>Start Date/Time</label><input type="datetime-local" id="startTime" class="dark-input"></div>
+            <div class="input-group"><label>End Date/Time</label><input type="datetime-local" id="endTime" class="dark-input"></div>
+            <button class="btn-run" onclick="executeAudit()">Run Investigation</button>
+        </div>
+
+        <div id="resultsArea" class="results-grid">
+            <div class="panel">
+                <h3><i class="fa-solid fa-chart-area"></i> Historical Parameters</h3>
+                <div style="overflow-x: auto; max-height: 600px;">
+                    <table>
+                        <thead><tr><th>Time</th><th>Price</th><th>ATR %</th><th>ADX</th><th>RSI</th><th>Gate</th></tr></thead>
+                        <tbody id="marketBody"></tbody>
+                        <tfoot id="avgFoot"></tfoot> 
+                    </table>
+                </div>
+            </div>
+            <div class="panel"><h3><i class="fa-solid fa-code-compare"></i> Bot Decision Sync</h3><div id="comparisonBody"></div></div>
+        </div>
+
+        <div id="recommendationArea" class="panel">
+            <h3><i class="fa-solid fa-wand-magic-sparkles"></i> AI Logic Recommendations (Based on Period Data)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Parameter</th>
+                        <th>Current Setting</th>
+                        <th>Period Average</th>
+                        <th>Suggested Target</th>
+                        <th>Logic / Reason</th>
+                    </tr>
+                </thead>
+                <tbody id="recTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        async function executeAudit() {
+            const params = new URLSearchParams({
+                symbol: document.getElementById('symbol').value.toUpperCase(),
+                interval: document.getElementById('interval').value,
+                start: document.getElementById('startTime').value,
+                end: document.getElementById('endTime').value
+            });
+
+            const resultsArea = document.getElementById('resultsArea');
+            const recArea = document.getElementById('recommendationArea');
+            const marketBody = document.getElementById('marketBody');
+            const compareBody = document.getElementById('comparisonBody');
+            const avgFoot = document.getElementById('avgFoot');
+            const recBody = document.getElementById('recTableBody');
+
+            resultsArea.style.display = "grid";
+            marketBody.innerHTML = '<tr><td colspan="6" style="text-align:center">🔍 Investigating...</td></tr>';
+            compareBody.innerHTML = '';
+            avgFoot.innerHTML = '';
+            recArea.style.display = "none";
+
+            try {
+                // 1. جلب بيانات التدقيق
+                const res = await fetch(`/api/audit?${params}`);
+                const data = await res.json();
+                
+                // 2. جلب الإعدادات الحالية للبوت للمقارنة
+                const settingsRes = await fetch('/api/settings');
+                const currentSettings = await settingsRes.json();
+
+                if (!data || data.length === 0) { 
+                    marketBody.innerHTML = '<tr><td colspan="6" style="text-align:center">No data found.</td></tr>'; 
+                    return; 
+                }
+
+                marketBody.innerHTML = '';
+                let sums = { atr: 0, adx: 0, rsi: 0, count: 0 };
+
+                data.forEach(row => {
+                    sums.atr += parseFloat(row.atr_pct); 
+                    sums.adx += parseFloat(row.adx); 
+                    sums.rsi += parseFloat(row.rsi); 
+                    sums.count++;
+                    
+                    marketBody.insertAdjacentHTML('beforeend', `
+                        <tr>
+                            <td>${row.time}</td>
+                            <td>$${row.price}</td>
+                            <td>${row.atr_pct}%</td>
+                            <td>${row.adx}</td>
+                            <td>${row.rsi}</td>
+                            <td><span class="badge ${row.gate === 'OPEN' ? 'badge-open' : 'badge-closed'}">${row.gate}</span></td>
+                        </tr>`);
+
+                    if (row.real_action !== "NONE") {
+                        compareBody.insertAdjacentHTML('beforeend', `
+                            <div class="match-card">
+                                <div style="font-size:0.7rem; color:#8b949e">${row.time}</div>
+                                <div style="font-weight:bold; color:var(--accent); margin:5px 0;">Signal: ${row.real_action}</div>
+                                <div style="font-size:0.8rem">Logic Gate was <b>${row.gate}</b></div>
+                            </div>`);
+                    }
+                });
+
+                if (sums.count > 0) {
+                    const avgAtr = sums.atr / sums.count;
+                    const avgAdx = sums.adx / sums.count;
+                    const avgRsi = sums.rsi / sums.count;
+
+                    // عرض المتوسطات في الجدول الرئيسي
+                    avgFoot.innerHTML = `<tr class="avg-row"><td colspan="2">PERIOD AVERAGES</td><td>${avgAtr.toFixed(3)}%</td><td>${avgAdx.toFixed(1)}</td><td>${avgRsi.toFixed(1)}</td><td>---</td></tr>`;
+
+                    // --- منطق توليد الترشيحات الذكي ---
+                    recArea.style.display = "block";
+                    recBody.innerHTML = "";
+
+                    // 1. ترشيح ATR (السيولة والتقلب)
+                    const currAtr = parseFloat(currentSettings.gate_atr_min_pct || 0.003) * 100;
+                    let atrRec = avgAtr * 0.8; // اقتراح قيمة أقل من المتوسط بـ 20% لضمان التقاط الفرص
+                    recBody.insertAdjacentHTML('beforeend', `
+                        <tr>
+                            <td><b>Min ATR % (Gate)</b></td>
+                            <td>${currAtr.toFixed(3)}%</td>
+                            <td>${avgAtr.toFixed(3)}%</td>
+                            <td class="rec-suggested">${atrRec.toFixed(3)}%</td>
+                            <td class="rec-reason">${currAtr > avgAtr ? "Your filter is too strict for this period. Bot is likely missing trades." : "Filter is well-calibrated for current volatility."}</td>
+                        </tr>`);
+
+                    // 2. ترشيح ADX (قوة الاتجاه)
+                    const currAdx = parseFloat(currentSettings.gate_adx_min || 10);
+                    let adxRec = avgAdx > 20 ? 18 : 12; 
+                    recBody.insertAdjacentHTML('beforeend', `
+                        <tr>
+                            <td><b>Min ADX (Trend)</b></td>
+                            <td>${currAdx}</td>
+                            <td>${avgAdx.toFixed(1)}</td>
+                            <td class="rec-suggested">${adxRec}</td>
+                            <td class="rec-reason">${avgAdx < 15 ? "Market is largely sideways. Raising ADX limit helps avoid fakeouts." : "Strong trend environment detected."}</td>
+                        </tr>`);
+
+                    // 3. ترشيح RSI
+                    const currRsiMax = parseFloat(currentSettings.rsi_max_buy || 70);
+                    let rsiRec = avgRsi > 65 ? 75 : 70;
+                    recBody.insertAdjacentHTML('beforeend', `
+                        <tr>
+                            <td><b>Max RSI Buy</b></td>
+                            <td>${currRsiMax}</td>
+                            <td>${avgRsi.toFixed(1)}</td>
+                            <td class="rec-suggested">${rsiRec}</td>
+                            <td class="rec-reason">${avgRsi > currRsiMax ? "High momentum period. Raise RSI limit to 75 to catch the parabolic moves." : "Current RSI limit is safe."}</td>
+                        </tr>`);
+                }
+                
+                if(compareBody.innerHTML === '') {
+                    compareBody.innerHTML = '<div style="color:#555; text-align:center">No trades found in this window.</div>';
+                }
+
+            } catch (e) { 
+                console.error(e);
+                marketBody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:red">Error loading data. Check console.</td></tr>'; 
+            }
+        }
+    </script>
+</body>
+</html>
