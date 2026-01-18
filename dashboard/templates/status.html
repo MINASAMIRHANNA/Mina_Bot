@@ -275,7 +275,21 @@
 
     async function sendCommand(){
       const cmd = document.getElementById('botCmd').value;
-      await runAction('send_command', { cmd, params: {} });
+      // Sprint 7: queue command directly (does not rely on project_doctor)
+      showBar('', '');
+      try{
+        const res = await fetchJson('/api/commands/queue', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ cmd, params: {} })
+        });
+        showBar(res.ok ? 'ok' : 'err', `<b>${res.ok ? 'QUEUED' : 'FAILED'}</b>: ${res.message || ''}<br><span class="mono">command_id=${res.command_id || 0}</span>`);
+        await refreshStatus();
+      }catch(e){
+        console.error(e);
+        if (String(e).includes("Unauthorized")) return;
+        showBar('err', 'Error: <span class="mono">' + String(e) + '</span>');
+      }
     }
 
     // Init

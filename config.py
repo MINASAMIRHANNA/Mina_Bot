@@ -28,6 +28,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from db_path import get_db_path
+
 
 # ---------------------------------------------------------------------
 # DB path discovery (no env)
@@ -36,27 +38,12 @@ _BASE_DIR = Path(__file__).resolve().parent
 
 
 def _discover_db_file() -> str:
-    """Find the most likely bot_data.db.
+    """Return pinned bot_data.db path (Sprint 2).
 
-    Priority:
-    1) bot_data.db in current working directory
-    2) bot_data.db next to this config.py
-    3) bot_data.db in project root (parent)
-    4) fallback to config.py dir (will be created)
+    Uses .db_path in project root to avoid accidental duplicate DBs
+    when running from different working directories.
     """
-    candidates = [
-        Path(os.getcwd()) / "bot_data.db",
-        _BASE_DIR / "bot_data.db",
-        _BASE_DIR.parent / "bot_data.db",
-        _BASE_DIR.parent.parent / "bot_data.db",
-    ]
-    for c in candidates:
-        try:
-            if c.exists():
-                return str(c)
-        except Exception:
-            continue
-    return str(_BASE_DIR / "bot_data.db")
+    return get_db_path()
 
 
 def _read_settings(db_file: str) -> Dict[str, str]:
@@ -213,6 +200,11 @@ class Config:
         self.OI_CYCLE_DELAY_SEC = _as_float(self.get_raw("OI_CYCLE_DELAY_SEC"), 30.0)
         self.OI_BASELINE_WINDOW_SEC = _as_float(self.get_raw("OI_BASELINE_WINDOW_SEC"), 300.0)
 
+        # --- Backward-compat toggles ---
+        # If TRUE, some modules may honor OS env overrides for emergency debugging.
+        # Default is FALSE to respect Zero-ENV design.
+        self.ALLOW_ENV_OVERRIDES = _as_bool(self.get_raw("ALLOW_ENV_OVERRIDES") or self.get_raw("allow_env_overrides"), False)
+
         # --- Model flags ---
         self.AI_DISABLE_SHORT = _as_bool(self.get_raw("AI_DISABLE_SHORT"), True)
         self.USE_CLOSED_LOOP_MODELS = _as_bool(self.get_raw("USE_CLOSED_LOOP_MODELS"), False)
@@ -226,6 +218,91 @@ class Config:
 
         # --- Misc ---
         self.DISABLE_AUDIT_LAB = _as_bool(self.get_raw("DISABLE_AUDIT_LAB") or self.get_raw("disable_audit_lab"), False)
+
+        # Final normalization: RUN_MODE is the single source of truth.
+        try:
+            self.unify_run_mode()
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------
+    # Run Mode unification (Sprint 9)
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _normalize_run_mode(mode: str | None) -> str:
+        m = (str(mode or '').strip().upper())
+        if m in ('PAPER', 'PAPER_TRADING', 'SIM', 'SIMULATED'):
+            return 'PAPER'
+        if m in ('TEST', 'TESTNET', 'DEMO'):
+            return 'TEST'
+        if m in ('LIVE', 'REAL', 'PROD', 'PRODUCTION'):
+            return 'LIVE'
+        return ''
+
+    def _refresh_binance_endpoints(self) -> None:
+        """Keep REST/WS bases consistent with USE_TESTNET."""
+        if bool(getattr(self, 'USE_TESTNET', False)):
+            self.BINANCE_FUTURES_REST_BASE = 'https://demo-fapi.binance.com'
+            self.BINANCE_FUTURES_WS_BASE = 'wss://stream.binancefuture.com'
+        else:
+            self.BINANCE_FUTURES_REST_BASE = 'https://fapi.binance.com'
+            self.BINANCE_FUTURES_WS_BASE = 'wss://fstream.binance.com'
+
+    def apply_run_mode(self, mode: str | None, source: str = 'system') -> str:
+        """Apply canonical mode and prevent any conflicts.
+
+        Canonical mapping (single source of truth):
+        - PAPER: simulated only (no exchange orders)
+        - TEST : testnet trading (exchange orders enabled on testnet)
+        - LIVE : mainnet trading (exchange orders enabled on mainnet)
+        """
+        m = self._normalize_run_mode(mode)
+
+        # If not provided, infer from flags (legacy) without allowing conflicts.
+        if not m:
+            if bool(getattr(self, 'PAPER_TRADING', False)):
+                m = 'PAPER'
+            elif bool(getattr(self, 'USE_TESTNET', True)):
+                m = 'TEST'
+            else:
+                m = 'LIVE'
+
+        # Apply consistently.
+        if m == 'PAPER':
+            self.PAPER_TRADING = True
+            self.ENABLE_LIVE_TRADING = False
+            self.USE_TESTNET = True  # safety
+        elif m == 'TEST':
+            self.PAPER_TRADING = False
+            self.ENABLE_LIVE_TRADING = True
+            self.USE_TESTNET = True
+        elif m == 'LIVE':
+            self.PAPER_TRADING = False
+            self.ENABLE_LIVE_TRADING = True
+            self.USE_TESTNET = False
+        else:
+            m = 'TEST'
+            self.PAPER_TRADING = False
+            self.ENABLE_LIVE_TRADING = True
+            self.USE_TESTNET = True
+
+        self.RUN_MODE = m
+        # keep endpoints consistent
+        try:
+            self._refresh_binance_endpoints()
+        except Exception:
+            pass
+
+        # Helpful aliases for legacy code
+        self.MODE = m
+        return m
+
+    def unify_run_mode(self) -> str:
+        """Recompute/normalize RUN_MODE after reload() to avoid any contradictions."""
+        # Respect explicit RUN_MODE if provided, otherwise infer.
+        explicit = self._normalize_run_mode(getattr(self, 'RUN_MODE', None))
+        return self.apply_run_mode(explicit or None, source='config.reload')
+
 
     def to_dict(self, include_secrets: bool = False) -> Dict[str, Any]:
         d = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}

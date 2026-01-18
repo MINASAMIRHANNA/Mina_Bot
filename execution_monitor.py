@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from binance.client import Client
 from config import cfg
 from database import DatabaseManager
-from trading_executor import ensure_stop_loss, ensure_hard_tp, ensure_trailing_stop
+from trading_executor import ensure_stop_loss, ensure_hard_tp, ensure_trailing_stop, close_open_position
 
 
 import os
@@ -19,12 +19,40 @@ class _NoPingClient(Client):
             return {}
 
 def _futures_rest_base(use_testnet: bool) -> str:
-    env = os.getenv("BINANCE_FUTURES_REST_BASE", "").strip()
-    if env:
-        return env.rstrip("/")
-    return "https://demo-fapi.binance.com" if use_testnet else "https://fapi.binance.com"
+    """Resolve futures REST base URL.
+
+    Priority:
+    1) Explicit DB-backed setting (BINANCE_FUTURES_REST_BASE)
+    2) Optional OS env override (only if cfg.ALLOW_ENV_OVERRIDES=TRUE)
+    3) Default by testnet
+    """
+    # 1) DB-backed explicit override (preferred)
+    try:
+        if hasattr(cfg, 'get_raw'):
+            explicit = cfg.get_raw('BINANCE_FUTURES_REST_BASE') or cfg.get_raw('binance_futures_rest_base')
+        else:
+            explicit = None
+        explicit = (explicit or '').strip()
+        if explicit:
+            return explicit.rstrip('/')
+    except Exception:
+        pass
+
+    # 2) Backward-compat env override (disabled by default; keep Zero-ENV)
+    try:
+        if bool(getattr(cfg, 'ALLOW_ENV_OVERRIDES', False)):
+            env = os.getenv('BINANCE_FUTURES_REST_BASE', '').strip()
+            if env:
+                return env.rstrip('/')
+    except Exception:
+        pass
+
+    # 3) Default
+    return 'https://demo-fapi.binance.com' if use_testnet else 'https://fapi.binance.com'
+
 
 def _configure_futures_endpoints(c: Client, use_testnet: bool) -> None:
+
     rest_base = _futures_rest_base(use_testnet)
     candidates = {
         "FUTURES_URL": f"{rest_base}/fapi",
@@ -146,6 +174,16 @@ class ExecutionMonitor:
         self._last_prune_ts = 0.0
         self._prune_every_sec = 6 * 3600  # safety net (daily_routine also prunes)
 
+        # DB command polling (to drive dashboard/doctor buttons safely)
+        self._last_cmd_poll_ts = 0.0
+        try:
+            self.cmd_poll_every_sec = int(float(self.db.get_setting("command_poll_every_sec") or 1))
+            if self.cmd_poll_every_sec < 1:
+                self.cmd_poll_every_sec = 1
+        except Exception:
+            self.cmd_poll_every_sec = 1
+
+
     def _reload_runtime_settings(self):
         """Reload frequently changed flags from DB (dashboard-controlled)."""
         try:
@@ -173,6 +211,204 @@ class ExecutionMonitor:
 
     def stop(self):
         self.running = False
+
+
+    def _claim_pending_commands_filtered(self, only_cmds, limit: int = 50, worker: str = "execmon"):
+        """Best-effort filtered claim of commands from shared DB.
+
+        We intentionally claim ONLY the commands owned by execution_monitor,
+        so main.py will not consume them (and vice versa).
+
+        Returns list of (id, cmd, params_json_text).
+        """
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 50
+        if lim <= 0:
+            lim = 50
+
+        cmd_list = []
+        for c in (only_cmds or []):
+            s = str(c or '').strip().upper()
+            if s:
+                cmd_list.append(s)
+        if not cmd_list:
+            return []
+
+        try:
+            db = self.db
+            lock = getattr(db, 'lock', None)
+            conn = getattr(db, 'conn', None)
+            if conn is None:
+                return []
+
+            def _do_claim():
+                now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+                now_ms = int(time.time() * 1000)
+                try:
+                    conn.execute('BEGIN IMMEDIATE')
+                except Exception:
+                    pass
+
+                cur = conn.cursor()
+                placeholders = ','.join(['?'] * len(cmd_list))
+                rows = cur.execute(
+                    f"SELECT id, cmd, params FROM commands WHERE status='PENDING' AND UPPER(cmd) IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+                    tuple(cmd_list) + (lim,),
+                ).fetchall()
+
+                claimed = []
+                for r in (rows or []):
+                    try:
+                        cid = int(r[0])
+                        upd = cur.execute(
+                            "UPDATE commands SET status='IN_PROGRESS', claimed_by=?, claimed_at=?, claimed_at_ms=? WHERE id=? AND status='PENDING'",
+                            (str(worker), now_iso, int(now_ms), int(cid)),
+                        )
+                        if (upd.rowcount or 0) == 1:
+                            claimed.append((r[0], r[1], r[2]))
+                    except Exception:
+                        continue
+
+                conn.commit()
+                return claimed
+
+            if lock is not None:
+                with lock:
+                    return _do_claim()
+            return _do_claim()
+
+        except Exception:
+            return []
+
+    def _process_ops_commands(self, active_trades):
+        """Consume ops/maintenance commands intended for execution_monitor."""
+        try:
+            now_ts = time.time()
+            if (now_ts - float(self._last_cmd_poll_ts or 0.0)) < float(getattr(self, 'cmd_poll_every_sec', 1) or 1):
+                return
+            self._last_cmd_poll_ts = now_ts
+
+            commands = self._claim_pending_commands_filtered(
+                only_cmds=(
+                    'CHECK_PROTECTION_NOW',
+                    'CLOSE_TRADE',
+                    'CLOSE_ALL_POSITIONS',
+                ),
+                limit=50,
+                worker='execution_monitor',
+            )
+
+            for cid, cmd, params_str in (commands or []):
+                cmd_ok = True
+                cmd_err = ''
+                try:
+                    params = json.loads(params_str) if params_str else {}
+                    if not isinstance(params, dict):
+                        params = {}
+
+                    c = str(cmd or '').strip().upper()
+
+                    if c == 'CHECK_PROTECTION_NOW':
+                        # Convert the command into the existing "force" mechanism.
+                        tok = str(int(time.time() * 1000))
+                        try:
+                            self.db.set_setting('protection_audit_force', tok, source='execution_monitor', bump_version=False, audit=False)
+                        except Exception:
+                            self.db.set_setting('protection_audit_force', tok, source='execution_monitor')
+                        # Run immediately in this cycle.
+                        self._maybe_protection_audit(active_trades)
+
+                    elif c == 'CLOSE_TRADE':
+                        symbol = str(params.get('symbol') or params.get('sym') or '').strip().upper()
+                        reason = str(params.get('reason') or 'MANUAL_CLOSE').strip() or 'MANUAL_CLOSE'
+                        if not symbol:
+                            raise ValueError('params.symbol is required')
+
+                        res = close_open_position(symbol, execution_allowed=True)
+                        if not isinstance(res, dict) or not res.get('ok'):
+                            raise RuntimeError((res or {}).get('error') or 'close_open_position failed')
+
+                        # Try to close the DB trade (best-effort)
+                        avg_price = 0.0
+                        try:
+                            avg_price = float(((res.get('result') or {}) or {}).get('avgPrice') or 0.0)
+                        except Exception:
+                            avg_price = 0.0
+                        try:
+                            self.db.close_trade(symbol, reason, avg_price)
+                        except Exception:
+                            pass
+
+                    elif c == 'CLOSE_ALL_POSITIONS':
+                        reason = str(params.get('reason') or 'MANUAL_CLOSE_ALL').strip() or 'MANUAL_CLOSE_ALL'
+
+                        # 1) Prefer exchange truth for futures positions
+                        symbols = set()
+                        try:
+                            pos_all = self._api_call('positions_all', self.client.futures_position_information) or []
+                            for p in (pos_all or []):
+                                try:
+                                    amt = float(p.get('positionAmt') or 0)
+                                except Exception:
+                                    amt = 0.0
+                                if abs(amt) > 0.0:
+                                    symbols.add(str(p.get('symbol') or '').strip().upper())
+                        except Exception:
+                            pass
+
+                        # 2) Also include DB OPEN futures trades (useful for paper mode)
+                        try:
+                            for t in (active_trades or []):
+                                if str(t.get('status') or '').upper() == 'OPEN' and str(t.get('market_type') or '').lower() == 'futures':
+                                    symbols.add(str(t.get('symbol') or '').strip().upper())
+                        except Exception:
+                            pass
+
+                        symbols = [s for s in symbols if s]
+                        if not symbols:
+                            try:
+                                self._set_ack_meta(int(cid), {"note": "no_open_positions"})
+                            except Exception:
+                                pass
+                            # Treat as DONE (nothing to close)
+                            symbols = []
+
+                        for sym in symbols:
+                            try:
+                                res = close_open_position(sym, execution_allowed=True)
+                                if isinstance(res, dict) and res.get('ok'):
+                                    try:
+                                        avg_price = float(((res.get('result') or {}) or {}).get('avgPrice') or 0.0)
+                                    except Exception:
+                                        avg_price = 0.0
+                                    try:
+                                        self.db.close_trade(sym, reason, avg_price)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                # Continue closing other symbols
+                                cmd_ok = False
+                                cmd_err = f"partial_failure: {e}"
+
+                    else:
+                        raise ValueError(f'Unsupported command for execution_monitor: {c}')
+
+                except Exception as e:
+                    cmd_ok = False
+                    cmd_err = str(e)
+
+                finally:
+                    try:
+                        self.db.mark_command_done(int(cid), ok=bool(cmd_ok), error=str(cmd_err or ''))
+                    except Exception:
+                        try:
+                            self.db.mark_command_done(int(cid))
+                        except Exception:
+                            pass
+        except Exception:
+            return
 
     # ======================================================
     # MAIN LOOP
@@ -236,6 +472,12 @@ class ExecutionMonitor:
                     except Exception as e:
                         print(f"[EXEC_MON] Orphan sync error: {e}")
                 print(f"📊 [MONITOR] Active Trades in DB: {len(active_trades)}")
+
+                # Consume ops commands intended for execution_monitor (buttons/doctor)
+                try:
+                    self._process_ops_commands(active_trades)
+                except Exception as _e:
+                    print(f"[EXEC_MON] Command processing error: {_e}")
 
                 for trade in active_trades:
                     self._check_trade(trade, verbose=True)
@@ -446,7 +688,7 @@ class ExecutionMonitor:
             # ---------------- ENSURE PROTECTION ORDERS ----------------
             try:
                 mode_now = str(self.db.get_setting("mode") or "TEST").upper()
-                if mode_now == "LIVE":
+                if str(mode_now).upper() in ("LIVE","TEST"):
                     ensure_enabled = self.ensure_protection_orders
                     try:
                         ensure_enabled = str(self.db.get_setting("ensure_protection_orders") or ("1" if self.ensure_protection_orders else "0")).strip().upper() in ("1","TRUE","YES","ON","Y")
@@ -603,6 +845,46 @@ class ExecutionMonitor:
     # ======================================================
     # API METRICS (Rate limits / latency)
     # ======================================================
+
+    def _set_ack_meta(self, command_id: int, meta: dict) -> None:
+        # Best-effort write to commands.ack_meta if the column exists.
+        try:
+            cid = int(command_id)
+        except Exception:
+            return
+        try:
+            payload = json.dumps(meta or {}, ensure_ascii=False)
+        except Exception:
+            payload = '{}'
+
+        try:
+            conn = getattr(self.db, 'conn', None)
+            lock = getattr(self.db, 'lock', None)
+            if conn is None:
+                return
+
+            def _do():
+                try:
+                    cur = conn.cursor()
+                    cols = [r[1] for r in cur.execute('PRAGMA table_info(commands)').fetchall()]
+                    if 'ack_meta' not in cols:
+                        return
+                    cur.execute('UPDATE commands SET ack_meta=? WHERE id=?', (payload, cid))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.commit()
+                    except Exception:
+                        pass
+
+            if lock is not None:
+                with lock:
+                    _do()
+            else:
+                _do()
+        except Exception:
+            return
+
     def _api_call(self, name: str, fn, *args, **kwargs):
         t0 = time.time()
         try:
@@ -799,9 +1081,115 @@ class ExecutionMonitor:
             if not self.protection_audit_enabled:
                 return
             now = time.time()
-            if (now - float(self._last_protection_audit_ts or 0.0)) < float(self.protection_audit_every_sec or 30):
-                return
+
+            # Force audit now (triggered from dashboard)
+            forced = False
+            try:
+                tok = str(self.db.get_setting("protection_audit_force") or "").strip()
+                if tok and tok != str(getattr(self, "_last_protection_force_tok", "") or ""):
+                    self._last_protection_force_tok = tok
+                    forced = True
+            except Exception:
+                forced = False
+
+            # Force orphan cleanup now (triggered from dashboard)
+            cleanup_force = False
+            try:
+                tok2 = str(self.db.get_setting("orphan_orders_cleanup_force") or "").strip()
+                if tok2 and tok2 != str(getattr(self, "_last_orphan_cleanup_tok", "") or ""):
+                    self._last_orphan_cleanup_tok = tok2
+                    cleanup_force = True
+            except Exception:
+                cleanup_force = False
+
+            if (not forced) and (not cleanup_force):
+                if (now - float(self._last_protection_audit_ts or 0.0)) < float(self.protection_audit_every_sec or 30):
+                    return
+
             self._last_protection_audit_ts = now
+
+            # Helper: persist per-trade protection status (never crash)
+            def _persist_trade_protection(trade_id, pstatus, pdetails=None, perror=None):
+                try:
+                    if trade_id is None:
+                        return
+                    tid = int(trade_id)
+                    if tid <= 0:
+                        return
+                    if hasattr(self.db, "update_trade_protection"):
+                        self.db.update_trade_protection(
+                            tid,
+                            str(pstatus or "").strip().upper(),
+                            details=(pdetails or {}),
+                            error=(perror if perror else None),
+                            source="execution_monitor",
+                            emit_event=True,
+                        )
+                    else:
+                        # Fallback (older DB versions): best-effort direct UPDATE
+                        try:
+                            with self.db.lock:
+                                cols = set([c for c in self.db._table_columns("trades")]) if hasattr(self.db, "_table_columns") else set()
+                                ups = {}
+                                if "protection_status" in cols:
+                                    ups["protection_status"] = str(pstatus or "").strip().upper()
+                                if "protection_last_check_ms" in cols:
+                                    ups["protection_last_check_ms"] = int(time.time() * 1000)
+                                if "protection_details" in cols:
+                                    ups["protection_details"] = json.dumps(pdetails or {})
+                                if "protection_error" in cols:
+                                    ups["protection_error"] = str(perror)[:800] if perror else None
+                                if ups:
+                                    set_clause = ",".join([f"{k}=?" for k in ups.keys()])
+                                    vals = list(ups.values()) + [tid]
+                                    self.db.cursor.execute(f"UPDATE trades SET {set_clause} WHERE id=?", vals)
+                                    self.db.conn.commit()
+                        except Exception:
+                            pass
+                except Exception:
+                    return
+
+            # Key availability gate (for signed endpoints)
+            has_keys = bool((getattr(cfg, "BINANCE_API_KEY", "") or "").strip() and (getattr(cfg, "BINANCE_API_SECRET", "") or "").strip())
+
+            # If keys are missing, we can't verify exchange protection.
+            if not has_keys:
+                # Update OPEN futures trades so UI doesn't look "stuck"
+                for t in (active_trades or []):
+                    try:
+                        if str(t.get("status") or "").upper() != "OPEN":
+                            continue
+                        if str(t.get("market_type") or "").lower() != "futures":
+                            continue
+                        _persist_trade_protection(
+                            t.get("id"),
+                            "SKIPPED_NO_KEYS",
+                            pdetails={
+                                "note": "Missing BINANCE_API_KEY/SECRET; cannot call signed futures endpoints",
+                                "mode": str(self.db.get_setting("mode") or "TEST"),
+                                "use_testnet": bool(getattr(cfg, "USE_TESTNET", True)),
+                            },
+                            perror=None,
+                        )
+                    except Exception:
+                        continue
+
+                audit = {
+                    "updated_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "forced": bool(forced),
+                    "cleanup_force": bool(cleanup_force),
+                    "keys_present": False,
+                    "symbols_checked": [str(t.get("symbol") or "").upper() for t in (active_trades or []) if str(t.get("market_type") or "").lower() == "futures"],
+                    "counts": {"symbols": 0, "positions": 0, "open_orders": 0},
+                    "issues": {"missing_sl": [], "missing_tp": [], "missing_trail": [], "duplicates": [], "orphan_orders": []},
+                    "per_symbol": {},
+                    "message": "Missing BINANCE_API_KEY/SECRET; protection audit skipped",
+                }
+                try:
+                    self.db.set_setting("protection_audit_status", json.dumps(audit), source="execution_monitor", bump_version=False, audit=False)
+                except Exception:
+                    pass
+                return
 
             # pull ALL open orders once (cheaper)
             open_orders = self._api_call("open_orders_all", self.client.futures_get_open_orders) or []
@@ -846,6 +1234,9 @@ class ExecutionMonitor:
 
             audit = {
                 "updated_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "forced": bool(forced),
+                "cleanup_force": bool(cleanup_force),
+                "keys_present": True,
                 "symbols_checked": symbols,
                 "counts": {
                     "symbols": len(symbols),
@@ -933,6 +1324,42 @@ class ExecutionMonitor:
                 has_tp = any(str(o.get("type") or "").upper() in ("TAKE_PROFIT","TAKE_PROFIT_MARKET") for o in prot)
                 has_trail = any(str(o.get("type") or "").upper() == "TRAILING_STOP_MARKET" for o in prot)
 
+                # Update per-trade protection status (futures trades only)
+                try:
+                    if t and str(t.get("market_type") or "").lower() == "futures":
+                        tid = int(t.get("id") or 0)
+                        pdetails = {
+                            "symbol": s,
+                            "has_position": bool(has_pos),
+                            "expected": {"sl": bool(exp_sl), "tp": bool(exp_tp), "trail": bool(exp_trail)},
+                            "present": {"sl": bool(has_sl), "tp": bool(has_tp), "trail": bool(has_trail)},
+                            "order_types": type_counts,
+                            "open_orders_total": int(len(ol)),
+                            "protective_orders": int(len(prot)),
+                            "mode": str(self.db.get_setting("mode") or "TEST"),
+                            "use_testnet": bool(getattr(cfg, "USE_TESTNET", True)),
+                        }
+                        if has_pos:
+                            pdetails["position"] = pos
+
+                        # Decide status
+                        pstatus = "OK"
+                        missing = []
+                        if not has_pos:
+                            pstatus = "NO_POSITION"
+                        else:
+                            if exp_sl and (not has_sl):
+                                missing.append("SL")
+                            if exp_tp and (not has_tp):
+                                missing.append("TP")
+                            if exp_trail and (not has_trail):
+                                missing.append("TRAIL")
+                            if missing:
+                                pstatus = "MISSING_" + "_".join(missing)
+                        _persist_trade_protection(tid, pstatus, pdetails, None)
+                except Exception:
+                    pass
+
                 if exp_sl and not has_sl:
                     audit["issues"]["missing_sl"].append({"symbol": s, "expected_sl": sl_price})
                 if exp_tp and not has_tp:
@@ -964,6 +1391,13 @@ class ExecutionMonitor:
                         })
                     audit["issues"]["orphan_orders"].append({"symbol": s, "count": len(prot), "orders": oo})
 
+                    # Optional cleanup: cancel ALL open orders for symbols that are orphaned
+                    if cleanup_force:
+                        try:
+                            self._api_call(f"cancel_all_orphan_{s}", self.client.futures_cancel_all_open_orders, symbol=s)
+                        except Exception:
+                            pass
+
                 # per-symbol summary for UI
                 audit["per_symbol"][s] = {
                     "has_position": bool(has_pos),
@@ -985,6 +1419,18 @@ class ExecutionMonitor:
             # persist to DB settings for Doctor
             try:
                 self.db.set_setting("protection_audit_status", json.dumps(audit), source="execution_monitor", bump_version=False, audit=False)
+            except Exception:
+                pass
+
+            # ack tokens so UI can show "handled"
+            try:
+                if forced:
+                    self.db.set_setting("protection_audit_force_ack", str(int(time.time() * 1000)), source="execution_monitor", bump_version=False, audit=False)
+            except Exception:
+                pass
+            try:
+                if cleanup_force:
+                    self.db.set_setting("orphan_orders_cleanup_ack", str(int(time.time() * 1000)), source="execution_monitor", bump_version=False, audit=False)
             except Exception:
                 pass
 

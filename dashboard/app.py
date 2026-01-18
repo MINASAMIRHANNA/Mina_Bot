@@ -372,6 +372,29 @@ def _age_sec(dt_obj):
         return None
 
 
+def _percentile(vals, pct: float):
+    """Compute percentile (0..100) from a list of numbers (best-effort)."""
+    try:
+        arr = [float(v) for v in (vals or []) if v is not None]
+        if not arr:
+            return None
+        arr.sort()
+        if pct <= 0:
+            return arr[0]
+        if pct >= 100:
+            return arr[-1]
+        k = (len(arr) - 1) * (pct / 100.0)
+        f = int(k)
+        c = min(f + 1, len(arr) - 1)
+        if c == f:
+            return arr[f]
+        d0 = arr[f] * (c - k)
+        d1 = arr[c] * (k - f)
+        return d0 + d1
+    except Exception:
+        return None
+
+
 @app.get("/api/doctor")
 async def api_doctor():
     """Aggregated health + settings snapshot (login required)."""
@@ -380,6 +403,14 @@ async def api_doctor():
 
     # --- DB health ---
     db_file = getattr(db, "db_file", None)
+    # Sprint 2: DB pinning state (detect duplicates)
+    db_pin_state = {}
+    try:
+        from db_path import describe_db_state
+        db_pin_state = describe_db_state()
+    except Exception:
+        db_pin_state = {}
+
     db_ok = True
     db_error = None
     try:
@@ -459,6 +490,36 @@ async def api_doctor():
     models_status = _safe_json_loads(settings.get("models_status")) or {}
     positions_status = _safe_json_loads(settings.get("positions_status")) or {}
 
+    # Command queue counts (best-effort)
+    cmd_counts = {}
+    try:
+        conn = getattr(db, 'conn', None)
+        if conn is not None:
+            cur = conn.cursor()
+            try:
+                rows = cur.execute("SELECT status, COUNT(*) FROM commands GROUP BY status").fetchall()
+                cmd_counts = {str(r[0]): int(r[1]) for r in (rows or []) if r and r[0] is not None}
+            except Exception:
+                # legacy schema (no status)
+                total = cur.execute("SELECT COUNT(*) FROM commands").fetchone()[0]
+                cmd_counts = {"TOTAL": int(total)}
+    except Exception:
+        cmd_counts = {}
+
+    inbox_counts = {}
+    try:
+        conn = getattr(db, 'conn', None)
+        if conn is not None:
+            cur = conn.cursor()
+            try:
+                rows = cur.execute("SELECT status, COUNT(*) FROM signal_inbox GROUP BY status").fetchall()
+                inbox_counts = {str(r[0]): int(r[1]) for r in (rows or []) if r and r[0] is not None}
+            except Exception:
+                total = cur.execute("SELECT COUNT(*) FROM signal_inbox").fetchone()[0]
+                inbox_counts = {"TOTAL": int(total)}
+    except Exception:
+        inbox_counts = {}
+
     # DB open trades snapshot (best-effort)
     open_trades = []
     try:
@@ -474,14 +535,30 @@ async def api_doctor():
             open_trades_view.append({
                 "id": t.get("id"),
                 "symbol": t.get("symbol"),
+                "market_type": t.get("market_type"),
+                "status": t.get("status"),
+
+                # Strategy/meta
+                "signal": t.get("signal") or t.get("side"),
                 "side": t.get("side"),
+                "strategy_tag": t.get("strategy_tag") or t.get("strategy"),
+                "timeframe": t.get("timeframe"),
+                "opened_utc": t.get("opened_utc") or t.get("open_time_utc"),
+
+                # Sizing/prices (best-effort)
                 "qty": t.get("qty"),
                 "entry_price": t.get("entry_price"),
                 "stop_loss": t.get("stop_loss"),
                 "take_profits": t.get("take_profits"),
-                "status": t.get("status"),
-                "market_type": t.get("market_type"),
-                "opened_utc": t.get("opened_utc") or t.get("open_time_utc"),
+
+                # FSM (Sprint 8)
+                "fsm_state": t.get("fsm_state"),
+                "fsm_state_updated_ms": t.get("fsm_state_updated_ms"),
+
+                # Protection loop (Sprint 8)
+                "protection_status": t.get("protection_status"),
+                "protection_last_check_ms": t.get("protection_last_check_ms"),
+                "protection_details": _safe_json_loads(t.get("protection_details")),
             })
     except Exception:
         open_trades_view = []
@@ -634,7 +711,7 @@ async def api_doctor():
     return {
         "ok": db_ok,
         "time_utc": now_utc,
-        "db": {"file": db_file, "ok": db_ok, "error": db_error},
+        "db": {"file": db_file, "ok": db_ok, "error": db_error, "pin": db_pin_state},
         "components": {
             "bot": {"ok": bot_ok, "last_utc": bot_hb, "age_sec": bot_age},
             "execution_monitor": {"ok": exec_ok, "last_utc": exec_hb, "age_sec": exec_age},
@@ -663,10 +740,453 @@ async def api_doctor():
         "ws": ws_status,
         "models": models_status,
         "positions": {"exchange": positions_status, "db_open_trades": open_trades_view},
+        "counts": {"commands": cmd_counts, "inbox": inbox_counts, "open_trades": len(open_trades_view)},
         "warnings": warnings,
     }
 
 
+# =========================================
+# 🧠 EXPLANATION TRACE + 🚦 PERF SUMMARY (Sprint 6)
+# =========================================
+@app.get("/api/decision_traces")
+async def api_decision_traces(
+    symbol: str = "",
+    interval: str = "",
+    decision: str = "",
+    limit: int = 100,
+    since_ms: int = 0,
+):
+    """Query decision_traces with lightweight filters (login required)."""
+    lim = max(1, min(int(limit or 100), 500))
+    sym = str(symbol or "").strip().upper()
+    tf = str(interval or "").strip()
+    dec = str(decision or "").strip().upper()
+    since = int(since_ms or 0)
+
+    sql = "SELECT * FROM decision_traces WHERE 1=1"
+    params = []
+    if sym:
+        sql += " AND symbol=?"
+        params.append(sym)
+    if tf:
+        sql += " AND interval=?"
+        params.append(tf)
+    if dec:
+        sql += " AND decision=?"
+        params.append(dec)
+    if since > 0:
+        sql += " AND created_at_ms >= ?"
+        params.append(since)
+    sql += " ORDER BY created_at_ms DESC LIMIT ?"
+    params.append(lim)
+
+    out = []
+    try:
+        if getattr(db, "conn", None) is None:
+            return {"ok": False, "items": [], "error": "db.conn not available"}
+        lock = getattr(db, "lock", None)
+        if lock is None:
+            rows = db.conn.execute(sql, tuple(params)).fetchall()  # type: ignore
+        else:
+            with lock:
+                rows = db.conn.execute(sql, tuple(params)).fetchall()  # type: ignore
+        for r in (rows or []):
+            d = dict(r)
+            try:
+                if d.get("trace"):
+                    d["trace"] = json.loads(d.get("trace") or "{}")
+            except Exception:
+                pass
+            out.append(d)
+        return {"ok": True, "items": out, "count": len(out)}
+    except Exception as e:
+        return {"ok": False, "items": [], "error": str(e)}
+
+
+@app.get("/api/decision_traces/{trace_id}")
+async def api_decision_trace_one(trace_id: int):
+    """Fetch a single decision trace by id (login required)."""
+    try:
+        if getattr(db, "conn", None) is None:
+            return {"ok": False, "item": None, "error": "db.conn not available"}
+        lock = getattr(db, "lock", None)
+        if lock is None:
+            r = db.conn.execute("SELECT * FROM decision_traces WHERE id=?", (int(trace_id),)).fetchone()  # type: ignore
+        else:
+            with lock:
+                r = db.conn.execute("SELECT * FROM decision_traces WHERE id=?", (int(trace_id),)).fetchone()  # type: ignore
+        if not r:
+            return {"ok": False, "item": None, "error": "not found"}
+        d = dict(r)
+        try:
+            if d.get("trace"):
+                d["trace"] = json.loads(d.get("trace") or "{}")
+        except Exception:
+            pass
+        return {"ok": True, "item": d}
+    except Exception as e:
+        return {"ok": False, "item": None, "error": str(e)}
+
+
+@app.get("/api/perf/summary")
+async def api_perf_summary(window_sec: int = 600, limit: int = 5000, top_symbols: int = 15):
+    """Summarize recent perf_metrics (latency per symbol)."""
+    win = max(10, min(int(window_sec or 600), 24 * 3600))
+    lim = max(10, min(int(limit or 5000), 20000))
+    topn = max(5, min(int(top_symbols or 15), 50))
+
+    # Fetch recent events
+    rows = []
+    try:
+        if hasattr(db, "get_recent_perf_metrics"):
+            rows = db.get_recent_perf_metrics(window_sec=win, limit=lim) or []
+        else:
+            # Fallback: raw SQL
+            cutoff_ms = int(time.time() * 1000) - (win * 1000)
+            if getattr(db, "conn", None) is not None:
+                lock = getattr(db, "lock", None)
+                sql = "SELECT * FROM perf_metrics WHERE created_at_ms >= ? ORDER BY created_at_ms DESC LIMIT ?"
+                if lock is None:
+                    rows = [dict(r) for r in (db.conn.execute(sql, (cutoff_ms, lim)).fetchall() or [])]  # type: ignore
+                else:
+                    with lock:
+                        rows = [dict(r) for r in (db.conn.execute(sql, (cutoff_ms, lim)).fetchall() or [])]  # type: ignore
+    except Exception:
+        rows = []
+
+    # Aggregate
+    total = []
+    by_symbol = {}
+    fetch_ms = []
+    score_ms = []
+    model_ms = []
+
+    for r in (rows or []):
+        try:
+            sym = str(r.get("symbol") or "").upper().strip() or "?"
+            dur = r.get("duration_ms")
+            if dur is not None:
+                total.append(float(dur))
+                by_symbol.setdefault(sym, []).append(float(dur))
+            m = r.get("meta")
+            if isinstance(m, str) and m.strip().startswith("{"):
+                try:
+                    m = json.loads(m)
+                except Exception:
+                    pass
+            if isinstance(m, dict):
+                if m.get("fetch_ms") is not None:
+                    fetch_ms.append(float(m.get("fetch_ms")))
+                if m.get("score_ms") is not None:
+                    score_ms.append(float(m.get("score_ms")))
+                if m.get("model_ms") is not None:
+                    model_ms.append(float(m.get("model_ms")))
+        except Exception:
+            continue
+
+    overall = {
+        "count": len(total),
+        "avg": (sum(total) / len(total)) if total else None,
+        "p50": _percentile(total, 50),
+        "p95": _percentile(total, 95),
+        "p99": _percentile(total, 99),
+    }
+
+    stages = {
+        "fetch_ms": {"p95": _percentile(fetch_ms, 95), "avg": (sum(fetch_ms)/len(fetch_ms)) if fetch_ms else None},
+        "score_ms": {"p95": _percentile(score_ms, 95), "avg": (sum(score_ms)/len(score_ms)) if score_ms else None},
+        "model_ms": {"p95": _percentile(model_ms, 95), "avg": (sum(model_ms)/len(model_ms)) if model_ms else None},
+    }
+
+    # Rank slow symbols by p95 then avg
+    sym_rows = []
+    for sym, vals in by_symbol.items():
+        sym_rows.append({
+            "symbol": sym,
+            "count": len(vals),
+            "avg": (sum(vals)/len(vals)) if vals else None,
+            "p95": _percentile(vals, 95),
+            "p50": _percentile(vals, 50),
+        })
+    sym_rows.sort(key=lambda x: ((x.get("p95") or 0), (x.get("avg") or 0)), reverse=True)
+
+    return {
+        "ok": True,
+        "window_sec": win,
+        "items": len(rows or []),
+        "overall": overall,
+        "stages": stages,
+        "top_symbols": sym_rows[:topn],
+    }
+
+
+
+
+# =========================================
+# \ud83d\udd18 COMMAND CENTER (Sprint 7)
+# =========================================
+
+def _commands_cols() -> set:
+    try:
+        if getattr(db, 'conn', None) is None:
+            return set()
+        lock = getattr(db, 'lock', None)
+        if lock is None:
+            rows = db.conn.execute("PRAGMA table_info(commands)").fetchall()  # type: ignore
+        else:
+            with lock:
+                rows = db.conn.execute("PRAGMA table_info(commands)").fetchall()  # type: ignore
+        return {r[1] for r in (rows or [])}
+    except Exception:
+        return set()
+
+
+def _insert_command_row(cmd: str, params: dict | None = None, source: str = "dashboard") -> int:
+    """Insert a command row and return its id (best-effort across schema versions)."""
+    if getattr(db, 'conn', None) is None:
+        raise RuntimeError('db.conn not available')
+
+    cols = _commands_cols()
+    now_iso = _utc_iso_now()
+    now_ms = _ms_now()
+
+    data = {}
+    if 'cmd' in cols:
+        data['cmd'] = str(cmd).strip().upper()
+    if 'params' in cols:
+        data['params'] = json.dumps(params or {}, ensure_ascii=False)
+    if 'status' in cols:
+        data['status'] = 'PENDING'
+    if 'created_at' in cols:
+        data['created_at'] = now_iso
+    if 'created_at_ms' in cols:
+        data['created_at_ms'] = int(now_ms)
+    if 'source' in cols:
+        data['source'] = str(source)
+
+    # Fallback for very old schema
+    if not data:
+        # try DatabaseManager.add_command
+        if hasattr(db, 'add_command'):
+            db.add_command(str(cmd).strip().upper(), params or {}, source=source)
+            # best-effort last id
+            try:
+                lock = getattr(db, 'lock', None)
+                if lock is None:
+                    r = db.conn.execute('SELECT MAX(id) FROM commands').fetchone()  # type: ignore
+                else:
+                    with lock:
+                        r = db.conn.execute('SELECT MAX(id) FROM commands').fetchone()  # type: ignore
+                return int(r[0] or 0)
+            except Exception:
+                return 0
+        raise RuntimeError('commands table has no compatible columns')
+
+    keys = list(data.keys())
+    qmarks = ','.join(['?'] * len(keys))
+    sql = f"INSERT INTO commands({','.join(keys)}) VALUES({qmarks})"
+
+    lock = getattr(db, 'lock', None)
+    if lock is None:
+        cur = db.conn.execute(sql, tuple(data[k] for k in keys))  # type: ignore
+        db.conn.commit()  # type: ignore
+        return int(cur.lastrowid or 0)
+
+    with lock:
+        cur = db.conn.execute(sql, tuple(data[k] for k in keys))  # type: ignore
+        db.conn.commit()  # type: ignore
+        return int(cur.lastrowid or 0)
+
+
+@app.get('/api/commands')
+async def api_commands(status: str = '', cmd: str = '', limit: int = 50, since_ms: int = 0):
+    """List commands (login required)."""
+    lim = max(1, min(int(limit or 50), 500))
+    st = str(status or '').strip().upper()
+    cmdq = str(cmd or '').strip().upper()
+    since = int(since_ms or 0)
+
+    cols = _commands_cols()
+    has_status = 'status' in cols
+    has_ms = 'created_at_ms' in cols
+
+    sql = 'SELECT * FROM commands WHERE 1=1'
+    params = []
+    if cmdq:
+        sql += ' AND cmd=?'
+        params.append(cmdq)
+    if st and has_status:
+        sql += ' AND status=?'
+        params.append(st)
+    if since > 0 and has_ms:
+        sql += ' AND created_at_ms >= ?'
+        params.append(since)
+
+    order = 'created_at_ms DESC' if has_ms else 'id DESC'
+    sql += f' ORDER BY {order} LIMIT ?'
+    params.append(lim)
+
+    try:
+        if getattr(db, 'conn', None) is None:
+            return {'ok': False, 'items': [], 'error': 'db.conn not available'}
+        lock = getattr(db, 'lock', None)
+        if lock is None:
+            rows = db.conn.execute(sql, tuple(params)).fetchall()  # type: ignore
+        else:
+            with lock:
+                rows = db.conn.execute(sql, tuple(params)).fetchall()  # type: ignore
+
+        out = []
+        for r in (rows or []):
+            d = dict(r)
+            try:
+                if d.get('params') and isinstance(d.get('params'), str):
+                    d['params'] = json.loads(d.get('params') or '{}')
+            except Exception:
+                pass
+            out.append(d)
+        return {'ok': True, 'items': out, 'count': len(out)}
+    except Exception as e:
+        return {'ok': False, 'items': [], 'error': str(e)}
+
+
+@app.post('/api/commands/queue')
+async def api_commands_queue(request: Request):
+    """Queue a command into DB (login required)."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail='Body must be an object')
+    cmd = str(body.get('cmd') or '').strip().upper()
+    if not cmd:
+        raise HTTPException(status_code=400, detail='cmd is required')
+
+    params = body.get('params')
+    if isinstance(params, str):
+        # allow JSON string
+        try:
+            params = json.loads(params)
+        except Exception:
+            params = {'raw': params}
+    if not isinstance(params, dict):
+        params = {}
+
+    try:
+        cid = _insert_command_row(cmd, params=params, source='dashboard')
+        return {'ok': True, 'message': f'queued {cmd}', 'command_id': cid}
+    except Exception as e:
+        return {'ok': False, 'message': str(e), 'command_id': 0}
+
+
+@app.post('/api/commands/{cmd_id}/cancel')
+async def api_commands_cancel(cmd_id: int):
+    """Cancel a pending command (best-effort)."""
+    cid = int(cmd_id)
+    cols = _commands_cols()
+    try:
+        if getattr(db, 'conn', None) is None:
+            return {'ok': False, 'message': 'db.conn not available'}
+        lock = getattr(db, 'lock', None)
+        now = _utc_iso_now()
+        now_ms = _ms_now()
+
+        if 'status' not in cols:
+            # Legacy: delete row
+            sql = 'DELETE FROM commands WHERE id=?'
+            if lock is None:
+                cur = db.conn.execute(sql, (cid,))  # type: ignore
+                db.conn.commit()  # type: ignore
+            else:
+                with lock:
+                    cur = db.conn.execute(sql, (cid,))  # type: ignore
+                    db.conn.commit()  # type: ignore
+            return {'ok': True, 'message': 'deleted (legacy schema)', 'updated': int(cur.rowcount or 0)}
+
+        set_cols = ["status='CANCELLED'"]
+        params = []
+        if 'last_error' in cols:
+            set_cols.append('last_error=?')
+            params.append('cancelled by dashboard')
+        if 'done_at' in cols:
+            set_cols.append('done_at=?')
+            params.append(now)
+        if 'done_at_ms' in cols:
+            set_cols.append('done_at_ms=?')
+            params.append(int(now_ms))
+        params.append(cid)
+
+        sql = f"UPDATE commands SET {', '.join(set_cols)} WHERE id=? AND status='PENDING'"
+        if lock is None:
+            cur = db.conn.execute(sql, tuple(params))  # type: ignore
+            db.conn.commit()  # type: ignore
+        else:
+            with lock:
+                cur = db.conn.execute(sql, tuple(params))  # type: ignore
+                db.conn.commit()  # type: ignore
+        return {'ok': True, 'message': 'cancelled', 'updated': int(cur.rowcount or 0)}
+    except Exception as e:
+        return {'ok': False, 'message': str(e)}
+
+
+@app.post('/api/commands/{cmd_id}/retry')
+async def api_commands_retry(cmd_id: int):
+    """Retry a command: re-queue same cmd/params as a new row."""
+    cid = int(cmd_id)
+    cols = _commands_cols()
+    try:
+        if getattr(db, 'conn', None) is None:
+            return {'ok': False, 'message': 'db.conn not available'}
+        lock = getattr(db, 'lock', None)
+        if lock is None:
+            r = db.conn.execute('SELECT * FROM commands WHERE id=?', (cid,)).fetchone()  # type: ignore
+        else:
+            with lock:
+                r = db.conn.execute('SELECT * FROM commands WHERE id=?', (cid,)).fetchone()  # type: ignore
+        if not r:
+            return {'ok': False, 'message': 'not found'}
+        d = dict(r)
+        cmd = str(d.get('cmd') or '').strip().upper()
+        params = d.get('params')
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except Exception:
+                params = {'raw': params}
+        if not isinstance(params, dict):
+            params = {}
+
+        new_id = _insert_command_row(cmd, params=params, source='dashboard-retry')
+
+        # Mark old row as CANCELLED (if possible) to avoid re-processing
+        if 'status' in cols:
+            try:
+                now = _utc_iso_now()
+                now_ms = _ms_now()
+                set_cols = ["status='CANCELLED'"]
+                p2 = []
+                if 'last_error' in cols:
+                    set_cols.append('last_error=?')
+                    p2.append(f'retried as #{new_id}')
+                if 'done_at' in cols:
+                    set_cols.append('done_at=?')
+                    p2.append(now)
+                if 'done_at_ms' in cols:
+                    set_cols.append('done_at_ms=?')
+                    p2.append(int(now_ms))
+                p2.append(cid)
+                sql = f"UPDATE commands SET {', '.join(set_cols)} WHERE id=?"
+                if lock is None:
+                    db.conn.execute(sql, tuple(p2))  # type: ignore
+                    db.conn.commit()  # type: ignore
+                else:
+                    with lock:
+                        db.conn.execute(sql, tuple(p2))  # type: ignore
+                        db.conn.commit()  # type: ignore
+            except Exception:
+                pass
+
+        return {'ok': True, 'message': f'retried {cmd}', 'new_command_id': int(new_id)}
+    except Exception as e:
+        return {'ok': False, 'message': str(e)}
 # =========================================
 # 🧾 STATUS PAGE (Public)
 # =========================================
@@ -731,6 +1251,7 @@ BOOL_KEYS = {
         "exchange_trailing_enabled",
         "ensure_protection_orders",
     "decision_trace_enabled",
+    "perf_enabled",
     "protection_audit_enabled",
 
     # safe optional cleanup of orphan protective orders
@@ -751,6 +1272,8 @@ SETTING_RULES = {
     "ensure_protection_every_sec": ("int", 10, 3600),
 
     "decision_trace_every_sec": ("int", 1, 600),
+    "perf_every_sec": ("int", 1, 600),
+    "perf_max_rows": ("int", 10000, 2000000),
     "protection_audit_every_sec": ("int", 5, 3600),
 
     # orphan order cleanup knobs

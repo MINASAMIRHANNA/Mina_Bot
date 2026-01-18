@@ -7,10 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 
-AI_DISABLE_SHORT = bool(getattr(cfg, 'AI_DISABLE_SHORT', True))
-
-USE_CLOSED_LOOP_MODELS = bool(getattr(cfg, 'USE_CLOSED_LOOP_MODELS', False))
-
 import pandas as pd
 
 
@@ -255,11 +251,9 @@ class ModelManager:
             if prob_long <= 0.40:
                 # Many current models are trained as a *LONG opportunity* (binary) classifier.
                 # In that case, low prob_long means "NO LONG" not necessarily "SHORT".
-                if AI_DISABLE_SHORT:
+                if bool(getattr(cfg, 'AI_DISABLE_SHORT', True)):
                     return "WAIT", max(prob_long, prob_short), prob_long, prob_short
                 return "SHORT", prob_short, prob_long, prob_short
-            return "WAIT", max(prob_long, prob_short), prob_long, prob_short
-            return "SHORT", prob_short, prob_long, prob_short
             return "WAIT", max(prob_long, prob_short), prob_long, prob_short
 
         # Else use label

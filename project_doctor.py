@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import sqlite3
+import time
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -42,6 +43,19 @@ def utc_iso(dt: Optional[datetime] = None) -> str:
     dt = dt or utc_now()
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
+
+
+# ---------------------------------------------------------------------
+# SQLite helpers
+# ---------------------------------------------------------------------
+def _table_cols(con: sqlite3.Connection, table: str) -> set:
+    try:
+        rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        # row format: (cid, name, type, notnull, dflt_value, pk)
+        return {r[1] for r in rows} if rows else set()
+    except Exception:
+        return set()
 
 # ---------------------------------------------------------------------
 # Project root / imports
@@ -75,8 +89,32 @@ except Exception:
 # DB helpers
 # ---------------------------------------------------------------------
 def resolve_db_path() -> Path:
+    """Resolve DB path, preferring the project pin file (.db_path) and cfg.DB_FILE.
+
+    This avoids "phantom DB" issues when multiple bot_data.db files exist.
+    """
+    # 1) Pinned DB path (created by tools/runtime_diag.py and used across modules)
+    pin_file = PROJECT_ROOT / ".db_path"
+    if pin_file.exists():
+        try:
+            raw = pin_file.read_text(encoding="utf-8").strip()
+            if raw:
+                pinned = Path(raw).expanduser()
+                if pinned.exists():
+                    return pinned
+        except Exception:
+            pass
+
+    # 2) Config DB_FILE (if present)
     if cfg is not None and getattr(cfg, "DB_FILE", None):
-        return Path(getattr(cfg, "DB_FILE")).expanduser()
+        try:
+            p = Path(getattr(cfg, "DB_FILE")).expanduser()
+            if p.exists():
+                return p
+        except Exception:
+            pass
+
+    # 3) Common fallbacks inside repo
     root_db = PROJECT_ROOT / "bot_data.db"
     if root_db.exists():
         return root_db
@@ -86,6 +124,7 @@ def resolve_db_path() -> Path:
         return dash_db
 
     return root_db
+
 
 
 def connect_db(db_path: Path) -> sqlite3.Connection:
@@ -121,7 +160,14 @@ def ensure_min_schema(con: sqlite3.Connection) -> None:
           params TEXT,
           status TEXT DEFAULT 'PENDING',
           created_at TEXT,
-          updated_at TEXT
+          created_at_ms INTEGER,
+          source TEXT,
+          claimed_by TEXT,
+          claimed_at TEXT,
+          claimed_at_ms INTEGER,
+          done_at TEXT,
+          done_at_ms INTEGER,
+          last_error TEXT
         )
     """)
     cur.execute("""
@@ -135,7 +181,13 @@ def ensure_min_schema(con: sqlite3.Connection) -> None:
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_inbox_status ON signal_inbox(status)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_inbox_created ON signal_inbox(created_at)")
+    # Create a time index on whichever timestamp column exists (older schema uses received_at)
+    cols_inbox = _table_cols(con, 'signal_inbox')
+    if 'created_at' in cols_inbox:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_inbox_created ON signal_inbox(created_at)")
+    elif 'received_at' in cols_inbox:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_inbox_created ON signal_inbox(received_at)")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS rejections (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,7 +463,7 @@ def collect_status(
 
             db["last_log_time"] = safe_last_ts(con, "logs", ["timestamp", "time", "created_at"])
             db["last_snapshot_time"] = safe_last_ts(con, "equity_history", ["timestamp", "created_at"])
-            db["last_signal_time"] = safe_last_ts(con, "signal_inbox", ["created_at"])
+            db["last_signal_time"] = safe_last_ts(con, "signal_inbox", ["created_at", "received_at", "received_at_ms"])
             db["last_command_time"] = safe_last_ts(con, "commands", ["created_at", "updated_at"])
 
             try:
@@ -489,18 +541,88 @@ def _db_execute(db_path: Path, sql: str, params: Tuple[Any, ...] = ()) -> int:
 
 
 def insert_command(cmd: str, params: Optional[Dict[str, Any]] = None) -> int:
+    """Insert a command row in the most compatible way across schema versions."""
     db_path = resolve_db_path()
     con = connect_db(db_path)
     ensure_min_schema(con)
-    now = utc_iso()
-    cur = con.execute(
-        "INSERT INTO commands(cmd,params,status,created_at,updated_at) VALUES(?,?,?,?,?)",
-        (cmd, json.dumps(params or {}, ensure_ascii=False), "PENDING", now, now),
-    )
-    con.commit()
-    cid = int(cur.lastrowid)
-    con.close()
-    return cid
+
+    cols = _table_cols(con, 'commands')
+    now_iso = utc_iso()
+    now_ms = int(time.time() * 1000)
+
+    # Preferred payload
+    data: Dict[str, Any] = {}
+    if 'cmd' in cols:
+        data['cmd'] = cmd
+    if 'params' in cols:
+        data['params'] = json.dumps(params or {}, ensure_ascii=False)
+    if 'status' in cols:
+        data['status'] = 'PENDING'
+    if 'created_at' in cols:
+        data['created_at'] = now_iso
+    if 'created_at_ms' in cols:
+        data['created_at_ms'] = now_ms
+    if 'source' in cols:
+        data['source'] = 'doctor'
+    if 'updated_at' in cols:
+        data['updated_at'] = now_iso
+
+    # If schema detection fails, fall back to minimal insert attempts.
+    def _try_insert(keys):
+        ks = [k for k in keys if k in cols]
+        if not ks:
+            return None
+        q = ','.join(['?'] * len(ks))
+        sql = f"INSERT INTO commands({','.join(ks)}) VALUES({q})"
+        cur = con.execute(sql, tuple(data[k] for k in ks))
+        con.commit()
+        return int(cur.lastrowid)
+
+    try:
+        # try full detected columns first
+        if data:
+            keys = list(data.keys())
+            qmarks = ','.join(['?'] * len(keys))
+            sql = f"INSERT INTO commands({','.join(keys)}) VALUES({qmarks})"
+            cur = con.execute(sql, tuple(data[k] for k in keys))
+            con.commit()
+            cid = int(cur.lastrowid)
+            con.close()
+            return cid
+
+        # fallbacks
+        for ks in [
+            ['cmd','params','status','created_at','created_at_ms','source'],
+            ['cmd','params','created_at_ms'],
+            ['cmd','params'],
+            ['cmd'],
+        ]:
+            cid = _try_insert(ks)
+            if cid is not None:
+                con.close()
+                return cid
+
+        raise RuntimeError('commands table has no compatible columns')
+
+    except sqlite3.OperationalError as e:
+        # Aggressive fallback: try minimal known columns regardless of detection
+        try:
+            cur = con.execute("INSERT INTO commands(cmd, params) VALUES(?,?)", (cmd, json.dumps(params or {}, ensure_ascii=False)))
+            con.commit()
+            cid = int(cur.lastrowid)
+            con.close()
+            return cid
+        except Exception:
+            try:
+                cur = con.execute("INSERT INTO commands(cmd) VALUES(?)", (cmd,))
+                con.commit()
+                cid = int(cur.lastrowid)
+                con.close()
+                return cid
+            except Exception:
+                con.close()
+                raise e
+
 
 
 def set_setting(key: str, value: str, source: str = "ops") -> None:
@@ -563,13 +685,45 @@ def run_maintenance(action: str, **kwargs: Any) -> MaintenanceResult:
 
         if action == "clear_commands":
             days = _parse_int(kwargs.get("days"), 7)
-            cutoff_iso = utc_iso(utc_now() - timedelta(days=days))
-            n = _db_execute(
-                db_path,
-                "DELETE FROM commands WHERE status IN ('DONE','FAILED','CANCELLED') AND updated_at IS NOT NULL AND updated_at < ?",
-                (cutoff_iso,),
-            )
-            return MaintenanceResult(True, f"Cleared finished commands older than {days} days", {"deleted": n})
+            con = connect_db(db_path)
+            ensure_min_schema(con)
+            cols = _table_cols(con, 'commands')
+            con.close()
+
+            # Prefer updated_at/created_at; fallback to created_at_ms; else keep last 200 finished commands.
+            if 'updated_at' in cols or 'created_at' in cols:
+                tcol = 'updated_at' if 'updated_at' in cols else 'created_at'
+                cutoff_iso = utc_iso(utc_now() - timedelta(days=days))
+                n = _db_execute(
+                    db_path,
+                    f"DELETE FROM commands WHERE status IN ('DONE','FAILED','CANCELLED') AND {tcol} IS NOT NULL AND {tcol} < ?",
+                    (cutoff_iso,),
+                )
+                return MaintenanceResult(True, f"Cleared finished commands older than {days} days", {"deleted": n, "by": tcol})
+
+            if 'created_at_ms' in cols:
+                cutoff_ms = int((utc_now() - timedelta(days=days)).timestamp() * 1000)
+                n = _db_execute(
+                    db_path,
+                    "DELETE FROM commands WHERE status IN ('DONE','FAILED','CANCELLED') AND created_at_ms IS NOT NULL AND created_at_ms < ?",
+                    (cutoff_ms,),
+                )
+                return MaintenanceResult(True, f"Cleared finished commands older than {days} days", {"deleted": n, "by": 'created_at_ms'})
+
+            # Fallback (no timestamps): delete finished commands except last 200
+            keep_last = 200
+            con = connect_db(db_path)
+            ensure_min_schema(con)
+            r = con.execute("SELECT id FROM commands WHERE status IN ('DONE','FAILED','CANCELLED') ORDER BY id DESC LIMIT 1 OFFSET ?", (keep_last,)).fetchone()
+            if not r:
+                con.close()
+                return MaintenanceResult(True, "No commands to clear", {"deleted": 0})
+            cutoff_id = int(r['id'])
+            cur = con.execute("DELETE FROM commands WHERE status IN ('DONE','FAILED','CANCELLED') AND id <= ?", (cutoff_id,))
+            con.commit()
+            n = cur.rowcount if cur.rowcount is not None else 0
+            con.close()
+            return MaintenanceResult(True, f"Cleared finished commands (kept last {keep_last})", {"deleted": n, "cutoff_id": cutoff_id})
 
         if action == "reset_kill_switch":
             set_setting("kill_switch", "0", source="ops")

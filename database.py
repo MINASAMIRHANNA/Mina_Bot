@@ -4,6 +4,8 @@ import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
+from contextlib import nullcontext
+from typing import Optional, Tuple, List, Dict, Any
 
 
 class DatabaseManager:
@@ -23,13 +25,21 @@ class DatabaseManager:
             except Exception:
                 db_file = None
         if db_file is None:
+            # Sprint 2: DB pinning (avoid duplicate bot_data.db in different CWDs)
+            try:
+                from db_path import get_db_path
+                db_file = get_db_path()
+            except Exception:
+                db_file = None
+
+        if db_file is None:
             # Try common locations (supports running from /source or /dashboard)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             candidates = [
-                os.path.join(os.getcwd(), "bot_data.db"),
                 os.path.join(base_dir, "bot_data.db"),
                 os.path.join(os.path.dirname(base_dir), "bot_data.db"),
                 os.path.join(os.path.dirname(os.path.dirname(base_dir)), "bot_data.db"),
+                os.path.join(os.getcwd(), "bot_data.db"),
             ]
             for c in candidates:
                 try:
@@ -41,6 +51,33 @@ class DatabaseManager:
             if db_file is None:
                 # default location (will be created)
                 db_file = candidates[1]
+
+        # Normalize path early (helps with relative CWD issues)
+        try:
+            db_file = os.path.expanduser(str(db_file))
+        except Exception:
+            pass
+        try:
+            db_file = os.path.abspath(str(db_file))
+        except Exception:
+            pass
+
+        # If the target file exists but is NOT a SQLite DB, rename it safely and continue.
+        # This prevents confusing runtime errors like: "file is not a database".
+        try:
+            if db_file and os.path.exists(db_file) and os.path.isfile(db_file):
+                # A valid SQLite header starts with: b"SQLite format 3\x00"
+                with open(db_file, "rb") as f:
+                    head = f.read(16)
+                if head and (not head.startswith(b"SQLite format 3")):
+                    bad_name = f"{db_file}.bad.{int(time.time())}"
+                    try:
+                        os.rename(db_file, bad_name)
+                        print(f"⚠️ [DB] {db_file} is not a SQLite DB. Renamed to: {bad_name}")
+                    except Exception:
+                        print(f"⚠️ [DB] {db_file} is not a SQLite DB (unable to rename). Will create a fresh DB.")
+        except Exception:
+            pass
 
         self.db_file = db_file
 
@@ -64,6 +101,11 @@ class DatabaseManager:
         self.create_tables()
         self._seed_defaults()
         self._ensure_schema()
+        # Sprint 9: keep run mode + legacy keys consistent
+        try:
+            self.sync_legacy_mode_keys(self.get_setting("mode", "TEST"), source="db.init")
+        except Exception:
+            pass
         print(f"[DB] Connected to: {self.db_file}")
 
     # ==========================================================
@@ -118,11 +160,34 @@ class DatabaseManager:
                 """)
                 self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)")
 
+                # ---------------- TRADE EVENTS (Sprint 8: FSM / Protection history) ----------------
+                self.cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_id INTEGER,
+                        event_type TEXT,
+                        event_ts TEXT,
+                        event_ts_ms INTEGER,
+                        payload_json TEXT,
+                        source TEXT
+                    )
+                """)
+                try:
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_trade_time ON trade_events(trade_id, event_ts_ms)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_type_time ON trade_events(event_type, event_ts_ms)")
+                except Exception:
+                    pass
+
+
                 # ---------------- SETTINGS ----------------
+                # NOTE: Older DBs may have only (key,value). Schema additions are handled in _ensure_schema().
                 self.cursor.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
-                        value TEXT
+                        value TEXT,
+                        updated_at TEXT,
+                        version INTEGER DEFAULT 0,
+                        source TEXT
                     )
                 """)
 
@@ -168,7 +233,14 @@ class DatabaseManager:
                         status TEXT DEFAULT 'PENDING',
                         created_at TEXT,
                         created_at_ms INTEGER,
-                        source TEXT
+                        source TEXT,
+                        claimed_by TEXT,
+                        claimed_at TEXT,
+                        claimed_at_ms INTEGER,
+                        done_at TEXT,
+                        done_at_ms INTEGER,
+                        last_error TEXT,
+                        ack_meta TEXT
                     )
 """)
 
@@ -251,6 +323,29 @@ class DatabaseManager:
                 try:
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_decision_traces_time ON decision_traces(created_at_ms)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_decision_traces_symbol_time ON decision_traces(symbol, created_at_ms)")
+                except Exception:
+                    pass
+
+                # ---------------- PERF METRICS (Latency / Performance) ----------------
+                # Lightweight performance events to monitor analysis latency per symbol.
+                # Stored as append-only rows; pruning is done periodically.
+                self.cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS perf_metrics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT,
+                        created_at_ms INTEGER,
+                        symbol TEXT,
+                        interval TEXT,
+                        market_type TEXT,
+                        stage TEXT,
+                        duration_ms INTEGER,
+                        ok INTEGER,
+                        meta TEXT
+                    )
+                """)
+                try:
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_perf_metrics_time ON perf_metrics(created_at_ms)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_perf_metrics_symbol_time ON perf_metrics(symbol, created_at_ms)")
                 except Exception:
                     pass
                 # ---------------- LEARNING ----------------
@@ -412,6 +507,14 @@ class DatabaseManager:
         """Add missing columns/tables used by UTC + paper tournament + recommendations."""
         try:
             with self.lock:
+                # ---- settings additions (Sprint 8+: ops toggles + dashboard audit) ----
+                for col in [
+                    "updated_at TEXT",
+                    "version INTEGER DEFAULT 0",
+                    "source TEXT",
+                ]:
+                    self._add_column("settings", col)
+
                 # ---- analysis_results additions ----
                 for col in [
                     "signal_time_ms INTEGER",
@@ -458,8 +561,49 @@ class DatabaseManager:
                     "oi_change REAL",
                     "closed_at_ms INTEGER",
                     "confidence REAL",
+                    "signal_key TEXT",
+                    "candle_close_ms INTEGER",
+                    "timeframe TEXT",
+                    "inbox_id INTEGER",]:
+                    self._add_column("trades", col)
+
+
+                # ---- Sprint 8: trade FSM + protection fields (safe add-only) ----
+                for col in [
+                    "fsm_state TEXT",
+                    "fsm_state_since_ms INTEGER",
+                    "fsm_state_updated_ms INTEGER",
+                    "protection_status TEXT",
+                    "protection_last_check_ms INTEGER",
+                    "protection_details TEXT",
+                    "protection_error TEXT",
                 ]:
                     self._add_column("trades", col)
+
+                # ---- Sprint 8: command ACK metadata ----
+                for col in ["ack_meta TEXT"]:
+                    self._add_column("commands", col)
+
+                # ---- Sprint 8: trade_events history (idempotent) ----
+                try:
+                    self.cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS trade_events (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            trade_id INTEGER,
+                            event_type TEXT,
+                            event_ts TEXT,
+                            event_ts_ms INTEGER,
+                            payload_json TEXT,
+                            source TEXT
+                        )
+                    """)
+                except Exception:
+                    pass
+                try:
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_trade_time ON trade_events(trade_id, event_ts_ms)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_type_time ON trade_events(event_type, event_ts_ms)")
+                except Exception:
+                    pass
 
                 
                 # ---- equity_history additions (UTC snapshots) ----
@@ -474,19 +618,40 @@ class DatabaseManager:
                 # ---- optional ms/source columns for better dashboards (non-breaking) ----
                 for col in ["created_at_ms INTEGER", "source TEXT"]:
                     self._add_column("logs", col)
-                for col in ["created_at_ms INTEGER", "source TEXT"]:
+                # Sprint 2: robust command queue fields
+                for col in ["status TEXT DEFAULT 'PENDING'", "created_at TEXT", "created_at_ms INTEGER", "source TEXT",
+                            "claimed_by TEXT", "claimed_at TEXT", "claimed_at_ms INTEGER",
+                            "done_at TEXT", "done_at_ms INTEGER", "last_error TEXT"]:
                     self._add_column("commands", col)
                 for col in ["created_at_ms INTEGER"]:
                     self._add_column("settings_audit", col)
                 for col in ["state_since_ms INTEGER", "last_update_ms INTEGER"]:
                     self._add_column("trade_state", col)
+                # ---- signal_inbox idempotency additions (non-breaking) ----
+                for col in ["dedupe_key TEXT", "candle_close_ms INTEGER"]:
+                    self._add_column("signal_inbox", col)
+
+
+                # ---- signal_inbox compatibility: provide created_at columns (aliases for received_at) ----
+                for col in ["created_at TEXT", "created_at_ms INTEGER"]:
+                    self._add_column("signal_inbox", col)
+
 
                 # ---- helpful indexes ----
+                try:
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status, created_at_ms)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_commands_cmd_status ON commands(cmd, status)")
+                except Exception:
+                    pass
+
+
                 try:
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_time ON equity_history(timestamp_ms)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_date ON equity_history(date_utc)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_open_time ON trades(status, timestamp_ms)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_closed_time ON trades(status, closed_at_ms)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_signal_key ON trades(signal_key)")
+                    self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbox_dedupe_key ON signal_inbox(dedupe_key)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_time ON analysis_results(signal_time_ms)")
                     self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_symbol_time ON analysis_results(symbol, signal_time_ms)")
                 except Exception:
@@ -643,6 +808,9 @@ class DatabaseManager:
             "webhook_url": "",
             "webhook_enable_signal": "FALSE",
             "webhook_enable_trade": "FALSE",
+
+            # Backward compatibility only. Keep FALSE for Zero-ENV behavior.
+            "allow_env_overrides": "FALSE",
 
             "paper_tournament_enabled": "TRUE",
             "paper_eval_enabled": "TRUE",
@@ -828,43 +996,193 @@ class DatabaseManager:
             return 0
 
     def bump_settings_version(self, source="system") -> int:
-        """Increment __settings_version__ safely (no lock re-entry) and audit it."""
+        """Increment __settings_version__ safely and audit it.
+
+        - Avoids INSERT OR REPLACE when richer settings schema exists (so we don't drop metadata).
+        - Writes created_at_ms to settings_audit if that column exists.
+        """
         try:
-            now = self._utc_iso()
+            now_iso = self._utc_iso()
+            now_ms = self._ms_now()
             with self.lock:
+                # Read old
                 self.cursor.execute("SELECT value FROM settings WHERE key='__settings_version__'")
                 row = self.cursor.fetchone()
-                old_v = int(float(row["value"])) if row and row["value"] is not None else 0
+                old_v = int(float(row["value"])) if row and row.get("value") is not None else (int(float(row[0])) if row and row[0] is not None else 0)
                 new_v = old_v + 1
 
-                self.cursor.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                    ("__settings_version__", str(new_v))
-                )
-                self.cursor.execute(
-                    "INSERT INTO settings_audit (key, old_value, new_value, source, created_at) VALUES (?, ?, ?, ?, ?)",
-                    ("__settings_version__", str(old_v), str(new_v), source, now)
-                )
+                cols = self._table_columns('settings')
+                if {'updated_at','version','source'}.intersection(cols):
+                    # Prefer an UPSERT that preserves extra columns
+                    try:
+                        self.cursor.execute(
+                            """INSERT INTO settings(key,value,updated_at,source)
+                               VALUES(?,?,?,?)
+                               ON CONFLICT(key) DO UPDATE SET
+                                 value=excluded.value,
+                                 updated_at=excluded.updated_at,
+                                 source=excluded.source
+                            """,
+                            ('__settings_version__', str(new_v), now_iso, str(source))
+                        )
+                    except Exception:
+                        self.cursor.execute("UPDATE settings SET value=? WHERE key=?", (str(new_v), '__settings_version__'))
+                else:
+                    self.cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ('__settings_version__', str(new_v)))
+
+                # Audit
+                cols_a = self._table_columns('settings_audit')
+                if 'created_at_ms' in cols_a:
+                    self.cursor.execute(
+                        "INSERT INTO settings_audit (key, old_value, new_value, source, created_at, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
+                        ('__settings_version__', str(old_v), str(new_v), str(source), now_iso, int(now_ms))
+                    )
+                else:
+                    self.cursor.execute(
+                        "INSERT INTO settings_audit (key, old_value, new_value, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                        ('__settings_version__', str(old_v), str(new_v), str(source), now_iso)
+                    )
+
                 self.conn.commit()
             return new_v
         except Exception:
             return self.get_settings_version()
 
-    def set_setting(self, key, value, source="system", bump_version=True, audit=True):
+
+
+    # ==========================================================
+    # RUN MODE (Sprint 9) - single source of truth
+    # ==========================================================
+    @staticmethod
+    def _normalize_run_mode(mode) -> str:
+        m = str(mode or '').strip().upper()
+        if m in ('PAPER', 'PAPER_TRADING', 'SIM', 'SIMULATED'):
+            return 'PAPER'
+        if m in ('TEST', 'TESTNET', 'DEMO'):
+            return 'TEST'
+        if m in ('LIVE', 'REAL', 'PROD', 'PRODUCTION'):
+            return 'LIVE'
+        return 'TEST'
+
+    @classmethod
+    def _mode_to_legacy(cls, mode: str) -> dict:
+        m = cls._normalize_run_mode(mode)
+        return {
+            'RUN_MODE': m,
+            'MODE': m,
+            # Legacy boolean flags (strings so they work with existing UI/logic)
+            'USE_TESTNET': 'TRUE' if m in ('TEST','PAPER') else 'FALSE',
+            'PAPER_TRADING': 'TRUE' if m == 'PAPER' else 'FALSE',
+            'ENABLE_LIVE_TRADING': 'TRUE' if m in ('TEST','LIVE') else 'FALSE',
+        }
+
+    def get_run_mode(self) -> str:
+        try:
+            return self._normalize_run_mode(self.get_setting('mode', 'TEST'))
+        except Exception:
+            return 'TEST'
+
+    def sync_legacy_mode_keys(self, mode: str, source: str = 'mode_sync') -> None:
+        """Keep legacy keys in settings synced with canonical `mode`.
+
+        This is safe to call repeatedly; it only writes when values differ.
+        It DOES NOT bump the settings version (to avoid noisy reload loops).
+        """
+        m = self._normalize_run_mode(mode)
+        legacy = self._mode_to_legacy(m)
+        # Ensure canonical mode exists and is normalized
+        try:
+            cur = str(self.get_setting('mode', '') or '').strip().upper()
+        except Exception:
+            cur = ''
+        if cur != m:
+            # set canonical mode (no recursion)
+            try:
+                self.set_setting('mode', m, source=source, bump_version=False, audit=False, sync_mode=False)
+            except Exception:
+                pass
+
+        for k, v in legacy.items():
+            try:
+                existing = self.get_setting(k, None)
+            except Exception:
+                existing = None
+            if (existing is None) or (str(existing) != str(v)):
+                try:
+                    self.set_setting(k, v, source=source, bump_version=False, audit=False, sync_mode=False)
+                except Exception:
+                    pass
+
+    def set_setting(self, key, value, source="system", bump_version=True, audit=True, sync_mode=True):
         """Set a setting with optional audit + version bump."""
         try:
             now = self._utc_iso()
             new_val = str(value)
 
             with self.lock:
-                self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
-                row = self.cursor.fetchone()
-                old_val = row["value"] if row else None
+                cols = self._table_columns("settings")
 
-                self.cursor.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                    (key, new_val)
-                )
+                # Read old value (works for both schemas)
+                try:
+                    self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+                    row = self.cursor.fetchone()
+                    old_val = row["value"] if row else None
+                except Exception:
+                    old_val = None
+
+                # Prefer richer schema if available; fallback to legacy (key,value)
+                if "updated_at" in cols or "version" in cols or "source" in cols:
+                    # Ensure add-only migrations are applied
+                    try:
+                        if "updated_at" not in cols:
+                            self._add_column("settings", "updated_at TEXT")
+                        if "version" not in cols:
+                            self._add_column("settings", "version INTEGER DEFAULT 0")
+                        if "source" not in cols:
+                            self._add_column("settings", "source TEXT")
+                    except Exception:
+                        pass
+
+                    cols2 = self._table_columns("settings")
+                    if "version" in cols2:
+                        # Upsert with version increment (per-setting)
+                        self.cursor.execute(
+                            """
+                            INSERT INTO settings(key,value,updated_at,version,source)
+                            VALUES(?,?,?,?,?)
+                            ON CONFLICT(key) DO UPDATE SET
+                                value=excluded.value,
+                                updated_at=excluded.updated_at,
+                                version=COALESCE(settings.version,0)+1,
+                                source=excluded.source
+                            """,
+                            (key, new_val, now, 0, source),
+                        )
+                    else:
+                        # No version column (rare): update value + metadata only
+                        if "updated_at" in cols2 and "source" in cols2:
+                            self.cursor.execute(
+                                """
+                                INSERT INTO settings(key,value,updated_at,source)
+                                VALUES(?,?,?,?)
+                                ON CONFLICT(key) DO UPDATE SET
+                                    value=excluded.value,
+                                    updated_at=excluded.updated_at,
+                                    source=excluded.source
+                                """,
+                                (key, new_val, now, source),
+                            )
+                        else:
+                            self.cursor.execute(
+                                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                                (key, new_val),
+                            )
+                else:
+                    # Legacy schema
+                    self.cursor.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                        (key, new_val)
+                    )
 
                 if audit and (old_val != new_val):
                     self.cursor.execute(
@@ -874,6 +1192,12 @@ class DatabaseManager:
 
                 self.conn.commit()
 
+            # Sprint 9: when mode changes, sync legacy keys to prevent conflicts
+            if sync_mode and (str(key).strip().upper() in ("MODE", "RUN_MODE", "MODE_SETTING") or str(key).strip().lower() == "mode") :
+                try:
+                    self.sync_legacy_mode_keys(new_val, source=source)
+                except Exception:
+                    pass
             if bump_version and key != "__settings_version__":
                 self.bump_settings_version(source=source)
 
@@ -882,6 +1206,7 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ DB Set Setting Error: {e}")
             return False
+
 
     # ==========================================================
     # TRADE STATE (FSM)
@@ -980,6 +1305,200 @@ class DatabaseManager:
             pass
 
     # ==========================================================
+    
+    # ==========================================================
+    # TRADE EVENTS / FSM (Sprint 8)
+    # ==========================================================
+    def add_trade_event(self, trade_id: int, event_type: str, payload: dict = None, source: str = "system", already_locked: bool = False, commit: bool = True) -> None:
+        """Append an immutable trade event (best-effort).
+        If already_locked=True, caller holds self.lock and will commit.
+        """
+        if not trade_id or not event_type:
+            return
+        ctx = nullcontext() if already_locked else self.lock
+        try:
+            with ctx:
+                # Ensure table exists (best-effort)
+                try:
+                    self.cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS trade_events (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            trade_id INTEGER,
+                            event_type TEXT,
+                            event_ts TEXT,
+                            event_ts_ms INTEGER,
+                            payload_json TEXT,
+                            source TEXT
+                        )
+                    """)
+                except Exception:
+                    pass
+
+                ts = self._utc_iso()
+                ts_ms = self._ms_now()
+                pj = json.dumps(payload or {}, ensure_ascii=False)
+                self.cursor.execute(
+                    "INSERT INTO trade_events(trade_id, event_type, event_ts, event_ts_ms, payload_json, source) VALUES (?,?,?,?,?,?)",
+                    (int(trade_id), str(event_type), ts, int(ts_ms), pj, str(source or "system")),
+                )
+                if commit and not already_locked:
+                    self.conn.commit()
+        except Exception:
+            return
+
+    def set_trade_fsm_state(self, trade_id: int, new_state: str, meta: dict = None, source: str = "system", already_locked: bool = False, commit: bool = True) -> None:
+        """Update trade FSM state (best-effort, safe add-only).
+        Writes fields if present and logs a trade_event.
+        """
+        if not trade_id or not new_state:
+            return
+        ctx = nullcontext() if already_locked else self.lock
+        try:
+            with ctx:
+                cols = self._table_columns('trades')
+                now_ms = self._ms_now()
+
+                # Read current state (best-effort)
+                old_state = None
+                try:
+                    if 'fsm_state' in cols:
+                        r = self.cursor.execute('SELECT fsm_state FROM trades WHERE id=?', (int(trade_id),)).fetchone()
+                        if r:
+                            old_state = r[0]
+                except Exception:
+                    old_state = None
+
+                updates = {}
+                if 'fsm_state' in cols:
+                    updates['fsm_state'] = str(new_state)
+                if 'fsm_state_updated_ms' in cols:
+                    updates['fsm_state_updated_ms'] = int(now_ms)
+                if 'fsm_state_since_ms' in cols:
+                    # reset since_ms when state changes; keep if same
+                    try:
+                        if old_state != new_state:
+                            updates['fsm_state_since_ms'] = int(now_ms)
+                    except Exception:
+                        updates['fsm_state_since_ms'] = int(now_ms)
+
+                if updates:
+                    set_clause = ', '.join([f"{k}=?" for k in updates.keys()])
+                    vals = list(updates.values()) + [int(trade_id)]
+                    self.cursor.execute(f"UPDATE trades SET {set_clause} WHERE id=?", vals)
+
+                # Event log
+                try:
+                    self.add_trade_event(
+                        trade_id=int(trade_id),
+                        event_type='FSM_STATE',
+                        payload={"from": old_state, "to": str(new_state), "meta": meta or {}},
+                        source=source,
+                        already_locked=True,
+                        commit=False,
+                    )
+                except Exception:
+                    pass
+
+                if commit and not already_locked:
+                    self.conn.commit()
+        except Exception:
+            return
+
+
+    # ----------------------------------------------------------
+    # Sprint 8: Trade protection status (SL/TP/Trailing verifier)
+    # ----------------------------------------------------------
+    def update_trade_protection(
+        self,
+        trade_id: int,
+        status: str,
+        details: dict = None,
+        error: str = None,
+        source: str = "system",
+        emit_event: bool = True,
+        already_locked: bool = False,
+        commit: bool = True,
+    ) -> None:
+        """Update protection fields on trades (safe add-only columns).
+
+        This is a lightweight, best-effort helper used by execution_monitor.
+        It will NOT raise (to avoid breaking runtime loops).
+        """
+        try:
+            if trade_id is None:
+                return
+            def _do_update():
+                now_ms = self._ms_now()
+                cols = self._table_columns('trades')
+
+                # Detect previous status for event suppression
+                prev_status = None
+                try:
+                    if 'protection_status' in cols:
+                        r = self.cursor.execute(
+                            "SELECT protection_status FROM trades WHERE id=?",
+                            (int(trade_id),)
+                        ).fetchone()
+                        if r is not None:
+                            prev_status = r[0]
+                except Exception:
+                    prev_status = None
+
+                updates = {}
+                if 'protection_status' in cols:
+                    updates['protection_status'] = (status or '').strip().upper() if status is not None else None
+                if 'protection_last_check_ms' in cols:
+                    updates['protection_last_check_ms'] = int(now_ms)
+                if 'protection_details' in cols:
+                    try:
+                        updates['protection_details'] = json.dumps(details or {}, ensure_ascii=False)
+                    except Exception:
+                        updates['protection_details'] = json.dumps({"note": "details serialization failed"})
+                if 'protection_error' in cols:
+                    updates['protection_error'] = (str(error)[:800] if error else None)
+
+                if updates:
+                    set_clause = ', '.join([f"{k}=?" for k in updates.keys()])
+                    vals = list(updates.values()) + [int(trade_id)]
+                    self.cursor.execute(f"UPDATE trades SET {set_clause} WHERE id=?", vals)
+
+                # Log event only when status changes OR status indicates a problem
+                if emit_event and hasattr(self, 'add_trade_event'):
+                    try:
+                        new_status = (status or '').strip().upper()
+                        changed = (prev_status is None) or (str(prev_status).strip().upper() != new_status)
+                        problematic = new_status.startswith('MISSING') or new_status in (
+                            'ERROR', 'SKIPPED_NO_KEYS', 'SKIPPED_NO_AUTH'
+                        )
+                        if changed or problematic:
+                            self.add_trade_event(
+                                trade_id=int(trade_id),
+                                event_type='PROTECTION_CHECK',
+                                payload={
+                                    'status': new_status,
+                                    'error': (str(error)[:400] if error else None),
+                                    'details': (details or {}),
+                                },
+                                source=source,
+                                already_locked=True,
+                                commit=False,
+                            )
+                    except Exception:
+                        pass
+
+            if already_locked:
+                _do_update()
+            else:
+                with self.lock:
+                    _do_update()
+                if commit:
+                    try:
+                        self.conn.commit()
+                    except Exception:
+                        pass
+        except Exception:
+            return
+
     # TRADES MANAGEMENT
     # ==========================================================
     def add_trade(self, payload):
@@ -1048,8 +1567,60 @@ class DatabaseManager:
                     float(funding) if funding is not None else None,
                     float(oi_change) if oi_change is not None else None
                 ))
+                trade_id = int(self.cursor.lastrowid)
+
+                # Sprint 8: trade history + FSM (best-effort, add-only)
+                try:
+                    self.add_trade_event(
+                        trade_id=trade_id,
+                        event_type="TRADE_CREATED",
+                        payload={
+                            "symbol": payload.get("symbol"),
+                            "signal": payload.get("signal"),
+                            "entry_price": payload.get("entry_price"),
+                            "qty": payload.get("quantity"),
+                            "market_type": market_type,
+                            "strategy_tag": strategy_tag,
+                            "timeframe": payload.get("timeframe"),
+                            "candle_close_ms": payload.get("candle_close_ms"),
+                            "signal_key": payload.get("signal_key"),
+                        },
+                        source="db.add_trade",
+                        already_locked=True,
+                        commit=False,
+                    )
+                    self.set_trade_fsm_state(
+                        trade_id=trade_id,
+                        new_state="OPEN",
+                        meta={"note": "trade inserted"},
+                        source="db.add_trade",
+                        already_locked=True,
+                        commit=False,
+                    )
+                except Exception:
+                    pass
+
+                # Sprint 5: idempotency metadata (safe add-only columns)
+                try:
+                    cols = self._table_columns('trades')
+                    updates = {}
+                    if 'signal_key' in cols and payload.get('signal_key'):
+                        updates['signal_key'] = str(payload.get('signal_key'))
+                    if 'candle_close_ms' in cols and payload.get('candle_close_ms') is not None:
+                        updates['candle_close_ms'] = int(payload.get('candle_close_ms'))
+                    if 'timeframe' in cols and payload.get('timeframe'):
+                        updates['timeframe'] = str(payload.get('timeframe'))
+                    if 'inbox_id' in cols and payload.get('inbox_id') is not None:
+                        updates['inbox_id'] = int(payload.get('inbox_id'))
+                    if updates:
+                        set_clause = ', '.join([f"{k}=?" for k in updates.keys()])
+                        vals = list(updates.values()) + [trade_id]
+                        self.cursor.execute(f"UPDATE trades SET {set_clause} WHERE id=?", vals)
+                except Exception:
+                    pass
+
                 self.conn.commit()
-                return int(self.cursor.lastrowid)
+                return trade_id
 
         except Exception as e:
             print(f"❌ DB Add Trade Error: {e}")
@@ -1107,6 +1678,19 @@ class DatabaseManager:
                     return
 
                 trade_id = int(row["id"])
+
+                # Sprint 8: FSM transition (best-effort)
+                try:
+                    self.set_trade_fsm_state(
+                        trade_id=trade_id,
+                        new_state="CLOSING",
+                        meta={"reason": reason},
+                        source="db.close_trade",
+                        already_locked=True,
+                        commit=False,
+                    )
+                except Exception:
+                    pass
                 entry = float(row["entry_price"] or 0.0)
                 qty = float(row["quantity"] or 0.0)
                 sig = str(row["signal"] or "")
@@ -1156,6 +1740,32 @@ class DatabaseManager:
                     json.dumps(base_explain),
                     trade_id
                 ))
+
+                # Sprint 8: trade close event + state (best-effort)
+                try:
+                    self.add_trade_event(
+                        trade_id=trade_id,
+                        event_type="TRADE_CLOSED",
+                        payload={
+                            "reason": reason,
+                            "close_price": cp,
+                            "pnl": pnl,
+                        },
+                        source="db.close_trade",
+                        already_locked=True,
+                        commit=False,
+                    )
+                    self.set_trade_fsm_state(
+                        trade_id=trade_id,
+                        new_state="CLOSED",
+                        meta={"reason": reason, "pnl": pnl},
+                        source="db.close_trade",
+                        already_locked=True,
+                        commit=False,
+                    )
+                except Exception:
+                    pass
+
                 self.conn.commit()
 
                 # Closed-loop: label sample linked to this trade (best-effort)
@@ -1200,7 +1810,44 @@ class DatabaseManager:
         except Exception:
             return None
 
-    def acquire_symbol_lock(self, symbol: str, ttl_sec: int | None = None):
+    def get_trade_by_signal_key(self, signal_key: str):
+        """Return the most recent trade row for a signal_key (OPEN or CLOSED).
+
+        Used for idempotency to prevent duplicate executions across restarts.
+        """
+        try:
+            sk = str(signal_key or '').strip()
+            if not sk:
+                return None
+            with self.lock:
+                cur = self.conn.cursor()
+                cur.execute("SELECT * FROM trades WHERE signal_key=? ORDER BY timestamp_ms DESC LIMIT 1", (sk,))
+                row = cur.fetchone()
+                return self._row_to_trade(row) if row else None
+        except Exception:
+            return None
+
+    def has_trade_signal_key(self, signal_key: str, *, status: Optional[str] = None) -> bool:
+        """True if a trade exists for this signal_key.
+
+        If status is provided (e.g., 'OPEN'), filter by status.
+        """
+        try:
+            sk = str(signal_key or '').strip()
+            if not sk:
+                return False
+            with self.lock:
+                cur = self.conn.cursor()
+                if status:
+                    cur.execute("SELECT 1 FROM trades WHERE signal_key=? AND status=? LIMIT 1", (sk, str(status)))
+                else:
+                    cur.execute("SELECT 1 FROM trades WHERE signal_key=? LIMIT 1", (sk,))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
+
+    def acquire_symbol_lock(self, symbol: str, ttl_sec: Optional[int] = None):
         """Cross-process best-effort lock using settings table (atomic via BEGIN IMMEDIATE)."""
         try:
             sym = str(symbol or "").upper().strip()
@@ -1361,7 +2008,8 @@ class DatabaseManager:
     # ==========================================================
     def add_signal_inbox(self, *, symbol: str, timeframe: str = "", strategy: str = "", side: str = "",
                          confidence: float = 0.0, score: float = 0.0, payload=None,
-                         status: str = "RECEIVED", note=None, source: str = "bot"):
+                         status: str = "RECEIVED", note=None, source: str = "bot",
+                         dedupe_key: str = "", candle_close_ms: Optional[int] = None):
         """Insert a signal into signal_inbox so Dashboard can show/approve it."""
         try:
             sym = str(symbol or "").upper().strip()
@@ -1378,6 +2026,61 @@ class DatabaseManager:
 
             st = str(status or "").upper().strip()
             sd = str(side or "").upper().strip()
+            dk = str(dedupe_key or '').strip()
+            if not dk and isinstance(payload, dict) and payload.get('dedupe_key'):
+                dk = str(payload.get('dedupe_key') or '').strip()
+            # Strong dedupe across restarts (preferred): same dedupe_key => update existing pending/received/approved row
+            if dk:
+                try:
+                    cols_inbox = self._table_columns('signal_inbox')
+                    if 'dedupe_key' in cols_inbox:
+                        with self.lock:
+                            cur = self.conn.cursor()
+                            cur.execute(
+                                "SELECT id, status FROM signal_inbox WHERE dedupe_key=? ORDER BY received_at_ms DESC LIMIT 1",
+                                (dk,),
+                            )
+                            row = cur.fetchone()
+                            if row and row[0]:
+                                iid = int(row[0])
+                                prev_st = str(row[1] or '').upper().strip()
+                                if prev_st in {'PENDING_APPROVAL','RECEIVED','APPROVED'}:
+                                    cur.execute(
+                                        "UPDATE signal_inbox SET received_at=?, received_at_ms=?, source=?, status=?, symbol=?, timeframe=?, strategy=?, side=?, confidence=?, score=?, payload=?, note=?, dedupe_key=?, candle_close_ms=? WHERE id=?",
+                                        (
+                                            now.isoformat().replace('+00:00','Z'),
+                                            int(now_ms),
+                                            str(source or 'bot'),
+                                            st,
+                                            sym,
+                                            str(timeframe or ''),
+                                            str(strategy or ''),
+                                            sd,
+                                            float(confidence or 0.0),
+                                            float(score or 0.0),
+                                            json.dumps(payload or {}, ensure_ascii=False),
+                                            (str(note) if note is not None else None),
+                                            dk,
+                                            int(candle_close_ms) if candle_close_ms is not None else None,
+                                            iid,
+                                        ),
+                                    )
+                                    self.conn.commit()
+                                    # Compat: mirror received_at into created_at columns if present
+                                    try:
+                                        cols_inbox2 = self._table_columns('signal_inbox')
+                                        if 'created_at' in cols_inbox2:
+                                            cur.execute("UPDATE signal_inbox SET created_at=COALESCE(created_at, received_at) WHERE id=?", (iid,))
+                                        if 'created_at_ms' in cols_inbox2:
+                                            cur.execute("UPDATE signal_inbox SET created_at_ms=COALESCE(created_at_ms, received_at_ms) WHERE id=?", (iid,))
+                                        self.conn.commit()
+                                    except Exception:
+                                        pass
+
+                                    return iid
+                except Exception:
+                    pass
+
             if dedupe_ms > 0 and st in {"PENDING_APPROVAL", "RECEIVED"} and sym and sd:
                 try:
                     with self.lock:
@@ -1407,6 +2110,17 @@ class DatabaseManager:
                                     iid,
                                 ),
                             )
+                            # Compat: mirror received_at into created_at columns if present
+                            try:
+                                cols_inbox2 = self._table_columns('signal_inbox')
+                                if 'created_at' in cols_inbox2:
+                                    cur.execute("UPDATE signal_inbox SET created_at=COALESCE(created_at, received_at) WHERE id=?", (iid,))
+                                if 'created_at_ms' in cols_inbox2:
+                                    cur.execute("UPDATE signal_inbox SET created_at_ms=COALESCE(created_at_ms, received_at_ms) WHERE id=?", (iid,))
+                                self.conn.commit()
+                            except Exception:
+                                pass
+
                             self.conn.commit()
                             return iid
                 except Exception:
@@ -1436,8 +2150,31 @@ class DatabaseManager:
                         str(note) if note is not None else None,
                     ),
                 )
+                inbox_id = int(cur.lastrowid)
+
+                # Sprint 5: set dedupe_key/candle_close_ms if columns exist (non-breaking)
+                try:
+                    cols_inbox = self._table_columns('signal_inbox')
+                    updates = {}
+                    if 'dedupe_key' in cols_inbox and dk:
+                        updates['dedupe_key'] = dk
+                    if 'candle_close_ms' in cols_inbox and candle_close_ms is not None:
+                        updates['candle_close_ms'] = int(candle_close_ms)
+                    # Backward compatible aliases for tooling (project_doctor expects created_at)
+                    if 'created_at' in cols_inbox:
+                        updates['created_at'] = now.isoformat().replace('+00:00','Z')
+                    if 'created_at_ms' in cols_inbox:
+                        updates['created_at_ms'] = int(now_ms)
+                    if updates:
+                        set_clause = ', '.join([f"{k}=?" for k in updates.keys()])
+                        vals = list(updates.values()) + [inbox_id]
+                        cur.execute(f"UPDATE signal_inbox SET {set_clause} WHERE id=?", vals)
+                        self.conn.commit()
+                except Exception:
+                    pass
                 self.conn.commit()
-                return int(cur.lastrowid)
+
+                return inbox_id
         except Exception:
             return None
 
@@ -1501,6 +2238,13 @@ class DatabaseManager:
             d["explain"] = json.loads(d["explain"]) if d.get("explain") else {}
         except Exception:
             d["explain"] = {}
+
+        # Sprint 8: protection verifier details (optional JSON)
+        try:
+            d["protection_details"] = json.loads(d["protection_details"]) if d.get("protection_details") else {}
+        except Exception:
+            # keep raw string if it isn't JSON
+            d["protection_details"] = d.get("protection_details")
         return d
 
     
@@ -1661,18 +2405,176 @@ class DatabaseManager:
         except Exception:
             pass
 
-    def get_pending_commands(self):
+
+
+    def _commands_has_status(self) -> bool:
         try:
             with self.lock:
-                self.cursor.execute("SELECT id, cmd, params FROM commands WHERE status='PENDING'")
+                row = self.cursor.execute("PRAGMA table_info(commands)").fetchall()
+                cols = {r[1] for r in row} if row else set()
+                return "status" in cols
+        except Exception:
+            return False
+
+    def reset_stale_inprogress_commands(self, ttl_sec: int = 300) -> int:
+        """Reset stuck IN_PROGRESS commands back to PENDING.
+
+        Helps if bot crashes mid-command. Safe: only affects commands older than ttl_sec.
+        Returns number of rows updated.
+        """
+        try:
+            ttl = int(ttl_sec)
+        except Exception:
+            ttl = 300
+        if ttl <= 0:
+            ttl = 300
+
+        try:
+            with self.lock:
+                if not self._commands_has_status():
+                    return 0
+                now_ms = self._ms_now()
+                cutoff = now_ms - (ttl * 1000)
+                cur = self.conn.cursor()
+                cur.execute(
+                    "UPDATE commands SET status='PENDING' WHERE status='IN_PROGRESS' AND claimed_at_ms IS NOT NULL AND claimed_at_ms < ?",
+                    (cutoff,)
+                )
+                n = cur.rowcount or 0
+                self.conn.commit()
+                return int(n)
+        except Exception:
+            return 0
+
+    def claim_pending_commands(self, limit: int = 50, worker: str = "worker", only_cmds=None):
+        """Atomically claim pending commands (exactly-once best effort).
+
+        If only_cmds is provided, ONLY those commands are claimed (ownership isolation).
+        Returns a list of rows like: (id, cmd, params)
+        """
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 50
+        if lim <= 0:
+            lim = 50
+
+        # Normalize filter list
+        cmd_list = []
+        for c in (only_cmds or []):
+            s = str(c or "").strip().upper()
+            if s:
+                cmd_list.append(s)
+
+        try:
+            with self.lock:
+                if not self._commands_has_status():
+                    pending = self.get_pending_commands()[:lim]
+                    if not cmd_list:
+                        return pending
+                    out = []
+                    for r in pending:
+                        try:
+                            if str(r[1] or "").strip().upper() in cmd_list:
+                                out.append(r)
+                        except Exception:
+                            continue
+                    return out[:lim]
+
+                # Clean stale in-progress (best effort)
+                try:
+                    self.reset_stale_inprogress_commands(ttl_sec=300)
+                except Exception:
+                    pass
+
+                now = self._utc_iso()
+                ms = self._ms_now()
+
+                # Use an IMMEDIATE transaction to reduce cross-process race conditions.
+                try:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                except Exception:
+                    pass
+
+                cur = self.conn.cursor()
+                if cmd_list:
+                    placeholders = ",".join(["?"] * len(cmd_list))
+                    rows = cur.execute(
+                        f"SELECT id, cmd, params FROM commands WHERE status='PENDING' AND UPPER(cmd) IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+                        tuple(cmd_list) + (lim,),
+                    ).fetchall()
+                else:
+                    rows = cur.execute(
+                        "SELECT id, cmd, params FROM commands WHERE status='PENDING' ORDER BY id ASC LIMIT ?",
+                        (lim,)
+                    ).fetchall()
+
+                claimed = []
+                for r in rows or []:
+                    try:
+                        cid = r[0]
+                        upd = cur.execute(
+                            "UPDATE commands SET status='IN_PROGRESS', claimed_by=?, claimed_at=?, claimed_at_ms=? WHERE id=? AND status='PENDING'",
+                            (str(worker), now, int(ms), int(cid))
+                        )
+                        if (upd.rowcount or 0) == 1:
+                            claimed.append((r[0], r[1], r[2]))
+                    except Exception:
+                        continue
+
+                self.conn.commit()
+                return claimed
+        except Exception:
+            return []
+
+    def get_pending_commands(self):
+        """Legacy-safe: return pending command rows.
+
+        If commands table has a 'status' column, filter status='PENDING'.
+        Otherwise, return all rows (best-effort backward compatibility).
+        """
+        try:
+            with self.lock:
+                if self._commands_has_status():
+                    self.cursor.execute("SELECT id, cmd, params FROM commands WHERE status='PENDING' ORDER BY id ASC")
+                else:
+                    # Very old schema: no status column
+                    self.cursor.execute("SELECT id, cmd, params FROM commands ORDER BY id ASC")
                 return self.cursor.fetchall()
         except Exception:
             return []
 
-    def mark_command_done(self, cmd_id):
+    def mark_command_done(self, cmd_id, ok: bool = True, error: str = ""):
+        """Mark a command terminal state (DONE/FAILED) with timestamps.
+
+        Backward compatible: if commands table lacks status/done columns, best-effort update.
+        """
         try:
+            cid = int(cmd_id)
+        except Exception:
+            return
+
+        try:
+            now = self._utc_iso()
+            ms = self._ms_now()
+            status = 'DONE' if bool(ok) else 'FAILED'
+            err = str(error or '')
             with self.lock:
-                self.cursor.execute("UPDATE commands SET status='DONE' WHERE id=?", (cmd_id,))
+                if self._commands_has_status():
+                    try:
+                        self.cursor.execute(
+                            "UPDATE commands SET status=?, done_at=?, done_at_ms=?, last_error=? WHERE id=?",
+                            (status, now, int(ms), err, int(cid))
+                        )
+                    except Exception:
+                        # minimal fallback
+                        self.cursor.execute("UPDATE commands SET status=? WHERE id=?", (status, int(cid)))
+                else:
+                    # legacy schema
+                    try:
+                        self.cursor.execute("UPDATE commands SET status=? WHERE id=?", (status, int(cid)))
+                    except Exception:
+                        pass
                 self.conn.commit()
         except Exception:
             pass
@@ -2330,8 +3232,8 @@ class DatabaseManager:
     # ==========================================================
     # PUMP HUNTER
     # ==========================================================
-    def update_pump_hunter_state(self, heartbeat_ms: int | None = None, scan_ms: int | None = None,
-                                 scan_count: int | None = None, last_error: str | None = None) -> None:
+    def update_pump_hunter_state(self, heartbeat_ms: Optional[int] = None, scan_ms: Optional[int] = None,
+                                 scan_count: Optional[int] = None, last_error: Optional[str] = None) -> None:
         """Update Pump Hunter heartbeat/scan status (singleton row id=1)."""
         try:
             with self.lock:
@@ -2376,7 +3278,7 @@ class DatabaseManager:
         except Exception:
             return {"id": 1, "last_heartbeat_ms": 0, "last_scan_ms": 0, "last_scan_count": 0, "last_error": ""}
 
-    def upsert_pump_hunter_oi(self, symbol: str, oi: float, ts_ms: int) -> tuple[float | None, float | None]:
+    def upsert_pump_hunter_oi(self, symbol: str, oi: float, ts_ms: int) -> Tuple[Optional[float], Optional[float]]:
         """Store last OI for symbol; returns (prev_oi, oi_change_pct)."""
         try:
             symbol = str(symbol).upper().strip()
@@ -2452,7 +3354,7 @@ class DatabaseManager:
         except Exception:
             return 0
 
-    def list_pump_candidates(self, limit: int = 50, status: str | None = "PENDING") -> list[dict]:
+    def list_pump_candidates(self, limit: int = 50, status: Optional[str] = 'PENDING') -> List[Dict[str, Any]]:
         try:
             limit = max(1, min(int(limit), 500))
             st = str(status).upper() if status else None
@@ -2480,7 +3382,7 @@ class DatabaseManager:
         except Exception:
             return []
 
-    def get_pump_candidate(self, cid: int) -> dict | None:
+    def get_pump_candidate(self, cid: int) -> Optional[Dict[str, Any]]:
         try:
             cid = int(cid)
             with self.lock:
@@ -2858,6 +3760,107 @@ try:
                     return 0
 
             DatabaseManager.prune_decision_traces = prune_decision_traces
+
+        # ---- Optional helper: perf metrics (Latency per symbol) ----
+        if not hasattr(DatabaseManager, "add_perf_metric"):
+            def add_perf_metric(self, event: dict) -> bool:
+                """Insert a perf metric row (best-effort)."""
+                try:
+                    if not isinstance(event, dict):
+                        return False
+                    now = self._utc_iso()
+                    ms = self._ms_now()
+                    symbol = str(event.get("symbol") or "").upper().strip()
+                    interval = str(event.get("interval") or "")
+                    market_type = str(event.get("market_type") or "")
+                    stage = str(event.get("stage") or "")
+
+                    def _i(x):
+                        try:
+                            return int(float(x))
+                        except Exception:
+                            return None
+
+                    duration_ms = _i(event.get("duration_ms"))
+                    okv = event.get("ok")
+                    ok_int = 1 if (okv is True or str(okv).strip() in {"1","true","True","YES","yes"}) else 0
+                    meta = event.get("meta")
+                    if isinstance(meta, (dict, list)):
+                        meta = json.dumps(meta, ensure_ascii=False)
+                    meta = str(meta) if meta is not None else ""
+
+                    with self.lock:
+                        cur = self.conn.cursor()
+                        cur.execute(
+                            """INSERT INTO perf_metrics (
+                                   created_at, created_at_ms, symbol, interval, market_type,
+                                   stage, duration_ms, ok, meta
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (now, ms, symbol, interval, market_type, stage, duration_ms, ok_int, meta),
+                        )
+                        self.conn.commit()
+                    return True
+                except Exception:
+                    return False
+
+            DatabaseManager.add_perf_metric = add_perf_metric
+
+        if not hasattr(DatabaseManager, "get_recent_perf_metrics"):
+            def get_recent_perf_metrics(self, window_sec: int = 600, limit: int = 2000):
+                """Fetch recent perf metrics (best-effort)."""
+                try:
+                    win = int(window_sec) if window_sec else 600
+                    win = max(10, min(win, 24 * 3600))
+                    lim = int(limit) if limit else 2000
+                    lim = max(10, min(lim, 10000))
+                    cutoff_ms = self._ms_now() - (win * 1000)
+                    with self.lock:
+                        cur = self.conn.cursor()
+                        cur.execute(
+                            "SELECT * FROM perf_metrics WHERE created_at_ms >= ? ORDER BY created_at_ms DESC LIMIT ?",
+                            (cutoff_ms, lim),
+                        )
+                        rows = cur.fetchall() or []
+                    out = []
+                    for r in rows:
+                        d = dict(r)
+                        # best-effort parse meta JSON
+                        try:
+                            mv = d.get("meta")
+                            if mv:
+                                d["meta"] = json.loads(mv)
+                        except Exception:
+                            pass
+                        out.append(d)
+                    return out
+                except Exception:
+                    return []
+
+            DatabaseManager.get_recent_perf_metrics = get_recent_perf_metrics
+
+        if not hasattr(DatabaseManager, "prune_perf_metrics"):
+            def prune_perf_metrics(self, max_rows: int = 200000):
+                """Keep perf_metrics from growing without bounds."""
+                try:
+                    mr = int(max_rows) if max_rows else 200000
+                    mr = max(10000, min(mr, 2_000_000))
+                    with self.lock:
+                        cur = self.conn.cursor()
+                        cur.execute("SELECT COUNT(1) AS c FROM perf_metrics")
+                        c = int(cur.fetchone()[0] or 0)
+                        if c <= mr:
+                            return 0
+                        to_del = c - mr
+                        cur.execute(
+                            "DELETE FROM perf_metrics WHERE id IN (SELECT id FROM perf_metrics ORDER BY created_at_ms ASC LIMIT ?)",
+                            (to_del,),
+                        )
+                        self.conn.commit()
+                    return to_del
+                except Exception:
+                    return 0
+
+            DatabaseManager.prune_perf_metrics = prune_perf_metrics
 
 except Exception:
     # Never break import بسبب patch section

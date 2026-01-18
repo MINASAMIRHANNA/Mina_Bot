@@ -55,13 +55,115 @@ from risk_monitor import RiskSupervisor
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+db = DatabaseManager()
+# Sprint 9: unify run mode to avoid conflicts (TEST/LIVE/PAPER)
+try:
+    _mode_db = db.get_setting("mode") or getattr(cfg, "RUN_MODE", "TEST")
+except Exception:
+    _mode_db = getattr(cfg, "RUN_MODE", "TEST")
+try:
+    _mode_final = cfg.apply_run_mode(str(_mode_db), source="db")
+except Exception:
+    _mode_final = str(_mode_db or "TEST").strip().upper()
+try:
+    db.sync_legacy_mode_keys(_mode_final, source="main.startup")
+except Exception:
+    pass
+
 MODEL = ModelManager("./models")
 dm = DataManager()
-db = DatabaseManager()
+
+def _mode_allows_orders(mode: str) -> bool:
+    m = str(mode or '').strip().upper()
+    return m in ('LIVE','TEST')
 
 analysis_semaphore = asyncio.Semaphore(cfg.MAX_CONCURRENT_TASKS)
 TF_LIST = None  # will be set from env below
 PROCESSING_COINS = set()
+
+# ==========================================================
+# SPRINT 5: IDEMPOTENCY + DEDUPE KEYS
+# ==========================================================
+
+_INTERVAL_MS_MAP = {
+    '1m': 60_000,
+    '3m': 180_000,
+    '5m': 300_000,
+    '15m': 900_000,
+    '30m': 1_800_000,
+    '1h': 3_600_000,
+    '2h': 7_200_000,
+    '4h': 14_400_000,
+    '6h': 21_600_000,
+    '8h': 28_800_000,
+    '12h': 43_200_000,
+    '1d': 86_400_000,
+}
+
+def _interval_to_ms(tf: str) -> int:
+    tf = str(tf or '').strip()
+    if tf in _INTERVAL_MS_MAP:
+        return _INTERVAL_MS_MAP[tf]
+    # fallback: try number+unit like 10m
+    try:
+        n = int(tf[:-1])
+        unit = tf[-1]
+        if unit == 'm':
+            return n * 60_000
+        if unit == 'h':
+            return n * 3_600_000
+        if unit == 'd':
+            return n * 86_400_000
+    except Exception:
+        pass
+    return 0
+
+def _candle_close_ms_from_kline(kline, df, tf: str) -> int:
+    # Prefer WS kline closeTime (Binance: 'T' close time ms, 't' open time ms)
+    try:
+        if isinstance(kline, dict):
+            for key in ('T', 'closeTime', 'ct'):
+                v = kline.get(key)
+                if v is not None:
+                    vv = int(v)
+                    if vv > 0:
+                        return vv
+            # Some payloads: open time 't' then add interval
+            v = kline.get('t')
+            if v is not None:
+                ot = int(v)
+                step = _interval_to_ms(tf)
+                if ot > 0 and step > 0:
+                    return ot + step
+    except Exception:
+        pass
+
+    # Fallback: use last df index (open_time) + interval
+    try:
+        if df is not None and hasattr(df, 'index') and len(df.index) > 0:
+            ot = int(df.index[-1].value // 1_000_000)
+            step = _interval_to_ms(tf)
+            if ot > 0 and step > 0:
+                return ot + step
+            return ot
+    except Exception:
+        pass
+
+    # last resort: now
+    try:
+        return int(time.time() * 1000)
+    except Exception:
+        return 0
+
+def _make_signal_key(symbol: str, market_type: str, tf: str, strategy_tag: str, side_txt: str, candle_close_ms: int) -> str:
+    sym = str(symbol or '').upper().strip()
+    mt = str(market_type or '').lower().strip()
+    tfv = str(tf or '').strip()
+    st = str(strategy_tag or '').strip()
+    sd = str(side_txt or '').upper().strip()
+    cc = int(candle_close_ms or 0)
+    return f"{sym}|{mt}|{tfv}|{st}|{sd}|{cc}"
+
 
 # --- BTC Market Regime cache (for market context & features) ---
 BTC_CACHE = {
@@ -118,6 +220,52 @@ def _maybe_add_decision_trace(trace: dict, throttle_key: str = "") -> None:
             _LAST_TRACE_PRUNE_TS = now
             if hasattr(db, "prune_decision_traces"):
                 db.prune_decision_traces(int(float(db.get_setting("decision_trace_max_rows") or 20000)))
+    except Exception:
+        return
+
+
+# --- Perf metrics (Latency / Performance) ---
+_LAST_PERF_TS = {}  # key -> last unix ts
+_LAST_PERF_PRUNE_TS = 0.0
+
+
+def _perf_enabled() -> bool:
+    try:
+        return str(db.get_setting("perf_enabled") or "TRUE").strip().upper() in ("1", "TRUE", "YES", "ON", "Y")
+    except Exception:
+        return True
+
+
+def _perf_every_sec() -> int:
+    try:
+        v = int(float(db.get_setting("perf_every_sec") or 30))
+        return max(1, min(v, 600))
+    except Exception:
+        return 30
+
+
+def _maybe_add_perf_metric(event: dict, throttle_key: str = "") -> None:
+    """Best-effort: store a perf metric row for Doctor (latency per symbol)."""
+    global _LAST_PERF_PRUNE_TS
+    try:
+        if not _perf_enabled():
+            return
+        key = throttle_key or f"{event.get('symbol','')}|{event.get('interval','')}|{event.get('market_type','')}"
+        now = time.time()
+        every = _perf_every_sec()
+        last = float(_LAST_PERF_TS.get(key) or 0.0)
+        if (now - last) < every:
+            return
+        _LAST_PERF_TS[key] = now
+
+        if hasattr(db, "add_perf_metric"):
+            db.add_perf_metric(event)
+
+        # prune occasionally
+        if (now - float(_LAST_PERF_PRUNE_TS or 0.0)) > 3600:
+            _LAST_PERF_PRUNE_TS = now
+            if hasattr(db, "prune_perf_metrics"):
+                db.prune_perf_metrics(int(float(db.get_setting("perf_max_rows") or 200000)))
     except Exception:
         return
 
@@ -304,7 +452,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
         if current_sl and current_sl > 0:
             if is_long and price <= current_sl:
                 cp = price
-                if mode_now == "LIVE":
+                if _mode_allows_orders(mode_now):
                     res = close_open_position(symbol)
                     if res.get("ok"):
                         cp = float(res.get("result", {}).get("avgPrice") or price)
@@ -313,7 +461,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
                 return True
             if is_short and price >= current_sl:
                 cp = price
-                if mode_now == "LIVE":
+                if _mode_allows_orders(mode_now):
                     res = close_open_position(symbol)
                     if res.get("ok"):
                         cp = float(res.get("result", {}).get("avgPrice") or price)
@@ -343,7 +491,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
                 retrace = (peak - price) / peak
                 if retrace >= retrace_pct:
                     cp = price
-                    if mode_now == "LIVE":
+                    if _mode_allows_orders(mode_now):
                         res = close_open_position(symbol)
                         if res.get("ok"):
                             cp = float(res.get("result", {}).get("avgPrice") or price)
@@ -354,7 +502,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
                 retrace = (price - trough) / trough
                 if retrace >= retrace_pct:
                     cp = price
-                    if mode_now == "LIVE":
+                    if _mode_allows_orders(mode_now):
                         res = close_open_position(symbol)
                         if res.get("ok"):
                             cp = float(res.get("result", {}).get("avgPrice") or price)
@@ -367,7 +515,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
             age_min = (int(time.time()*1000) - ts_ms) / 60000.0
             if age_min >= max_minutes and roi > 0:
                 cp = price
-                if mode_now == "LIVE":
+                if _mode_allows_orders(mode_now):
                     res = close_open_position(symbol)
                     if res.get("ok"):
                         cp = float(res.get("result", {}).get("avgPrice") or price)
@@ -418,7 +566,7 @@ def _manage_pump_dynamic_exit(symbol: str, active_trade: dict, df, price: float)
                 candidate = max(candidate, price * (1.0 + min_gap))
 
             if current_sl <= 0 or abs(candidate - current_sl) / max(1e-9, current_sl) >= 0.001:
-                if mode_now == "LIVE":
+                if _mode_allows_orders(mode_now):
                     try:
                         move_stop_loss(symbol, float(candidate))
                     except Exception:
@@ -855,15 +1003,29 @@ def hybrid_signal_decision_trace(final_score, rule_signal, ai_vote, ai_confidenc
 # CORE ANALYSIS ENGINE
 
 # ==========================================================
-def analyze_coin(symbol, tf, market_type="futures"):
+def analyze_coin(symbol, tf, market_type="futures", kline=None):
     if symbol in PROCESSING_COINS: return
     PROCESSING_COINS.add(symbol)
+
+    # Sprint 6: performance / latency monitoring (no strategy behavior change)
+    t0_perf = time.perf_counter()
+    t_fetch = None
+    t_scores = None
+    t_model = None
+    perf_phase = "start"
+    perf_err = None
 
     try:
         # 1. Fetch Data
         df = fetch_klines(symbol, tf, 500, market_type)
         if df is None or df.empty: return
         price = float(df["close"].iloc[-1])
+
+        t_fetch = time.perf_counter()
+        perf_phase = "fetched"
+
+        # Sprint 5: stable candle close timestamp (used for idempotency/dedupe across restarts)
+        candle_close_ms = _candle_close_ms_from_kline(kline, df, tf)
 
         # ----------------------------------------------------
                 # ----------------------------------------------------
@@ -901,7 +1063,7 @@ def analyze_coin(symbol, tf, market_type="futures"):
 
                     if needs_update:
                         log(f"🛡️ Trail Triggered for {symbol} (ROI: {roi*100:.2f}%) -> Moving SL to Breakeven", "TRADE")
-                        if mode_now == "LIVE":
+                        if _mode_allows_orders(mode_now):
                             try:
                                 move_stop_loss(symbol, new_sl)
                             except Exception:
@@ -1003,6 +1165,14 @@ def analyze_coin(symbol, tf, market_type="futures"):
 
         rule_signal = map_to_signal(final_score)
 
+        # perf: time until scoring completed
+        t_scores = time.perf_counter()
+        perf_phase = "scored"
+
+        # Indicators/scoring finished
+        t_scores = time.perf_counter()
+        perf_phase = "scored"
+
         # AI Prediction
         ai_vote = "OFF"
         ai_confidence = 0.0  # 0..1 (model output)
@@ -1023,7 +1193,14 @@ def analyze_coin(symbol, tf, market_type="futures"):
                         ai_vote = pred[0].get('signal', 'OFF') if isinstance(pred[0], dict) else "OFF"
                         ai_confidence = 0.0
 
+        t_model = time.perf_counter()
+        perf_phase = "model"
+
         ai_conf_pct = (ai_confidence * 100.0) if 0.0 <= ai_confidence <= 1.0 else ai_confidence
+
+        # perf: time until model step finished (even if MODEL is OFF)
+        t_model = time.perf_counter()
+        perf_phase = "modeled"
 
         # ======================================================
         # [CORRECTION] Apply Filters & Bonuses BEFORE Decision
@@ -1186,7 +1363,11 @@ def analyze_coin(symbol, tf, market_type="futures"):
             "exit_profile": exit_profile,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "explain": explain,
-            "leverage": int(float(db.get_setting("leverage_scalp") or getattr(cfg, "LEVERAGE_SCALP", 20))) if algo == "scalp" else int(float(db.get_setting("leverage_swing") or getattr(cfg, "LEVERAGE_SWING", 10)))
+            "leverage": int(float(db.get_setting("leverage_scalp") or getattr(cfg, "LEVERAGE_SCALP", 20))) if algo == "scalp" else int(float(db.get_setting("leverage_swing") or getattr(cfg, "LEVERAGE_SWING", 10))),
+            "timeframe": str(tf or ""),
+            "market_type": str(market_type or ""),
+            "strategy_tag": str(strategy or algo or ""),
+            "candle_close_ms": int(candle_close_ms or 0)
         }
 
         # --- Dashboard approval gate (no behavior change unless REQUIRE_DASHBOARD_APPROVAL=True) ---
@@ -1197,11 +1378,27 @@ def analyze_coin(symbol, tf, market_type="futures"):
         order_side = _normalize_order_side(rule_signal)
         # Strict: do not create PENDING or execute when decision is WAIT/invalid
         if order_side is None:
-            # rule_signal likely WAIT / NO_TRADE
             return
+
+        # Sprint 5: idempotency (dedupe same signal on same candle across restarts)
+        try:
+            if _setting_bool("dedupe_signal_keys", True):
+                side_txt = _side_text(order_side)
+                sig_key = _make_signal_key(symbol, market_type, tf, str(strategy or algo or ""), side_txt, int(candle_close_ms or 0))
+                payload["signal_key"] = sig_key
+                payload["dedupe_key"] = sig_key  # reuse for inbox
+                # Skip if this exact signal was already executed/logged
+                try:
+                    if hasattr(db, 'has_trade_signal_key') and db.has_trade_signal_key(sig_key):
+                        log(f"⏭️ DEDUPE skip (trade already exists for signal_key): {symbol} {tf} {side_txt}", "SYSTEM")
+                        return
+                except Exception:
+                    pass
+        except Exception:
+            pass
         execution_allowed = True
         if require_approval:
-            if str(mode_local).upper() == "LIVE":
+            if _mode_allows_orders(mode_local):
                 execution_allowed = auto_approve_live
             else:
                 execution_allowed = auto_approve_paper
@@ -1261,6 +1458,8 @@ def analyze_coin(symbol, tf, market_type="futures"):
                     payload=dict(pending_payload),
                     status="PENDING_APPROVAL",
                     source="bot",
+                    dedupe_key=str(pending_payload.get('dedupe_key') or pending_payload.get('signal_key') or ''),
+                    candle_close_ms=int(pending_payload.get('candle_close_ms') or 0) or None,
                 )
                 pending_payload["inbox_id"] = inbox_id
             except Exception:
@@ -1300,7 +1499,7 @@ def analyze_coin(symbol, tf, market_type="futures"):
             return
 
         mode = mode_local
-        if mode == "LIVE":
+        if _mode_allows_orders(mode):
             if market_type == 'futures':
                 set_leverage(symbol, payload['leverage'])
             
@@ -1328,8 +1527,47 @@ def analyze_coin(symbol, tf, market_type="futures"):
         log(f"✅ EXECUTED {symbol} {rule_signal} (Conf: {confidence:.1f}%, AI={ai_vote}({ai_conf_pct:.0f}%))", "TRADE")
 
     except Exception as e:
+        perf_err = str(e)
         log(f"{symbol} error: {e}", "ERROR")
     finally:
+        # Perf metric row (best-effort) — recorded even on early returns.
+        try:
+            t_end = time.perf_counter()
+            total_ms = int((t_end - t0_perf) * 1000)
+
+            def _ms(a, b):
+                try:
+                    if a is None or b is None:
+                        return None
+                    return int((b - a) * 1000)
+                except Exception:
+                    return None
+
+            fetch_ms = _ms(t0_perf, t_fetch) if t_fetch is not None else None
+            score_ms = _ms(t_fetch, t_scores) if (t_fetch is not None and t_scores is not None) else None
+            model_ms = _ms(t_scores, t_model) if (t_scores is not None and t_model is not None) else None
+
+            meta = {
+                "phase": perf_phase,
+                "fetch_ms": fetch_ms,
+                "score_ms": score_ms,
+                "model_ms": model_ms,
+            }
+            if perf_err:
+                meta["error"] = perf_err
+
+            _maybe_add_perf_metric({
+                "symbol": symbol,
+                "interval": tf,
+                "market_type": market_type,
+                "stage": "analyze_coin",
+                "duration_ms": total_ms,
+                "ok": False if perf_err else True,
+                "meta": meta,
+            }, throttle_key=f"{symbol}|{tf}|{market_type}")
+        except Exception:
+            pass
+
         PROCESSING_COINS.discard(symbol)
 
 # ==========================================================
@@ -1341,7 +1579,7 @@ async def async_analyze_wrapper(symbol, tf, kline, market_type):
     in async WebSocket callbacks without blocking the loop.
     """
     async with analysis_semaphore:
-        await asyncio.to_thread(analyze_coin, symbol, tf, market_type)
+        await asyncio.to_thread(analyze_coin, symbol, tf, market_type, kline)
 
 # ==========================================================
 # BACKGROUND TASKS
@@ -1353,17 +1591,128 @@ def run_risk_monitor_thread():
     except Exception as e:
         print(f"[WARN] Risk Monitor failed to start: {e}")
 
+
+
+def _claim_pending_commands_filtered(db, *, only_cmds, limit: int = 50, worker: str = "worker"):
+    """Claim only specific commands from the shared `commands` table.
+
+    Why: both main.py and execution_monitor.py run concurrently.
+    If one process claims *all* pending commands, it can accidentally consume
+    commands intended for the other process (and mark them DONE).
+
+    Returns a list of tuples: (id, cmd, params_json_text)
+    """
+    try:
+        lim = int(limit)
+    except Exception:
+        lim = 50
+    if lim <= 0:
+        lim = 50
+
+    cmd_list = []
+    for c in (only_cmds or []):
+        s = str(c or '').strip().upper()
+        if s:
+            cmd_list.append(s)
+
+    if not cmd_list:
+        return []
+
+    try:
+        lock = getattr(db, 'lock', None)
+        conn = getattr(db, 'conn', None)
+        if conn is None:
+            return []
+
+        # Legacy fallback: if status column doesn't exist, filter a simple pending list.
+        try:
+            cur = conn.cursor()
+            cur.execute('PRAGMA table_info(commands)')
+            cols = {r[1] for r in (cur.fetchall() or [])}
+            if 'status' not in cols:
+                pending = db.get_pending_commands() if hasattr(db, 'get_pending_commands') else []
+                out = []
+                for r in pending:
+                    try:
+                        if str(r[1] or '').strip().upper() in cmd_list:
+                            out.append((r[0], r[1], (r[2] if len(r) > 2 else None)))
+                    except Exception:
+                        continue
+                return out[:lim]
+        except Exception:
+            pass
+
+        def _do_claim():
+            now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+            now_ms = int(time.time() * 1000)
+
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+            except Exception:
+                pass
+
+            cur = conn.cursor()
+            placeholders = ','.join(['?'] * len(cmd_list))
+            rows = cur.execute(
+                f"SELECT id, cmd, params FROM commands WHERE status='PENDING' AND UPPER(cmd) IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+                tuple(cmd_list) + (lim,),
+            ).fetchall()
+
+            claimed = []
+            for r in (rows or []):
+                try:
+                    cid = int(r[0])
+                    upd = cur.execute(
+                        "UPDATE commands SET status='IN_PROGRESS', claimed_by=?, claimed_at=?, claimed_at_ms=? WHERE id=? AND status='PENDING'",
+                        (str(worker), now_iso, int(now_ms), int(cid)),
+                    )
+                    if (upd.rowcount or 0) == 1:
+                        claimed.append((r[0], r[1], r[2]))
+                except Exception:
+                    continue
+
+            conn.commit()
+            return claimed
+
+        if lock is not None:
+            with lock:
+                return _do_claim()
+        return _do_claim()
+
+    except Exception:
+        return []
 async def command_monitor_task():
     """Listens for manual commands from Dashboard"""
     log("📡 Command Monitor Active...", "SYSTEM")
     while True:
         try:
-            commands = db.get_pending_commands()
+            # Claim only commands that main.py is responsible for.
+            # IMPORTANT: execution_monitor.py owns protection/close/cleanup commands.
+            only_cmds = (
+                'RELOAD_MODELS',
+                'RELOAD_CONFIG',
+                'MANUAL_TRADE',
+                'EXECUTE_SIGNAL',
+                'CHECK_SIGNAL',
+            )
+
+            # Prefer DB-native filtered claiming (Sprint 8+). Fallback to local helper for older DB code.
+            try:
+                commands = db.claim_pending_commands(limit=50, worker='main', only_cmds=only_cmds)
+            except TypeError:
+                commands = _claim_pending_commands_filtered(
+                    db,
+                    only_cmds=only_cmds,
+                    limit=50,
+                    worker='main',
+                )
             for cid, cmd, params_str in commands:
+                cmd_ok = True
+                cmd_err = ''
                 try:
                     params = json.loads(params_str) if params_str else {}
                     
-                    if cmd == "RELOAD_MODELS":
+                    if cmd in ("RELOAD_MODELS", "RELOAD_CONFIG"):
                         global _last_reload_ts
                         now_ts = time.time()
                         if (now_ts - float(_last_reload_ts or 0.0)) < float(RELOAD_MODELS_COOLDOWN_SEC or 60):
@@ -1377,7 +1726,6 @@ async def command_monitor_task():
                                     _load_runtime_knobs_from_cfg()
                                 except Exception as _e:
                                     log(f"⚠️ Runtime knobs reload warning: {_e}", "SYSTEM")
-                                _load_runtime_knobs_from_cfg()
                             except Exception as e:
                                 log(f"⚠️ Config reload warning: {e}", "SYSTEM")
                             MODEL.reload()
@@ -1400,7 +1748,7 @@ async def command_monitor_task():
                             
                             # 2. Execute
                             mode = db.get_setting("mode") or "TEST"
-                            if mode == "LIVE":
+                            if _mode_allows_orders(mode):
                                 if m_type == 'futures': set_leverage(sym, 10)
                                 res = place_market_order(sym, side, qty, market_type=m_type)
                                 if res['ok']:
@@ -1481,6 +1829,22 @@ async def command_monitor_task():
                                     raise ValueError(f"Invalid side: {exec_payload.get('side') or exec_payload.get('decision') or ''}")
 
                             
+                            
+                            # Sprint 5: idempotency for approved executions (skip if trade already exists for same signal_key)
+                            try:
+                                sk = str(exec_payload.get('signal_key') or exec_payload.get('dedupe_key') or '').strip()
+                                if sk and hasattr(db, 'has_trade_signal_key') and db.has_trade_signal_key(sk):
+                                    log(f"⏭️ EXECUTE_SIGNAL dedupe (signal_key already traded): {sym} key={sk}", "SYSTEM")
+                                    # mark inbox executed to avoid re-queuing forever (best-effort)
+                                    try:
+                                        if inbox_id:
+                                            db.mark_signal_inbox_executed(inbox_id, note='Skipped duplicate (signal_key)')
+                                    except Exception:
+                                        pass
+                                    continue
+                            except Exception:
+                                pass
+
                             # Global cap guard: prevent command-driven executions from opening too many concurrent trades
                             try:
                                 cap = int(db.get_setting("max_concurrent_trades") or getattr(cfg, "MAX_CONCURRENT_TRADES", 0) or 0)
@@ -1494,7 +1858,7 @@ async def command_monitor_task():
                                 if active_n >= cap:
                                     log(f"⏭️ EXECUTE_SIGNAL skipped (cap reached): active={active_n} cap={cap} symbol={sym}", "SYSTEM")
                                     continue
-# avoid double-execution
+                            # avoid double-execution
                             if db.get_active_trade(sym):
                                 log(f"⏭️ EXECUTE_SIGNAL skipped (already active): {sym}", "SYSTEM")
                                 continue
@@ -1662,6 +2026,17 @@ async def command_monitor_task():
                             mode = str(db.get_setting("mode") or "TEST").upper()
 
                             exec_record = dict(exec_payload)
+                            # carry idempotency metadata
+                            if exec_payload.get('signal_key'):
+                                exec_record['signal_key'] = exec_payload.get('signal_key')
+                            if exec_payload.get('candle_close_ms'):
+                                try:
+                                    exec_record['candle_close_ms'] = int(exec_payload.get('candle_close_ms'))
+                                except Exception:
+                                    pass
+                            if exec_payload.get('timeframe'):
+                                exec_record['timeframe'] = exec_payload.get('timeframe')
+
                             # Trade rows should be OPEN so that risk limits / active trade checks work correctly.
                             exec_record["status"] = "OPEN"
                             exec_record["execution_allowed"] = True
@@ -1672,7 +2047,7 @@ async def command_monitor_task():
                             if sl_val > 0:
                                 exec_record["stop_loss"] = sl_val
 
-                            if mode == "LIVE":
+                            if _mode_allows_orders(mode):
                                 if m_type == "futures" and leverage:
                                     try:
                                         await asyncio.to_thread(set_leverage, sym, int(leverage))
@@ -1751,18 +2126,19 @@ async def command_monitor_task():
                             
                         asyncio.create_task(async_analyze_wrapper(sym, "5m", None, m_type))
 
-                    elif cmd == "CLOSE_TRADE":
-                        sym = params.get('symbol')
-                        if sym:
-                            res = close_open_position(sym)
-                            if res['ok']:
-                                db.close_trade(sym, "MANUAL_CLOSE", res['result']['avgPrice'])
-                                log(f"🛑 Manually Closed {sym}", "TRADE")
+                    # NOTE: Ops commands like CLOSE_TRADE / CLOSE_ALL_POSITIONS are handled by execution_monitor.py.
+                    # main.py intentionally does NOT claim them (filtered claiming).
 
                 except Exception as e:
+                    cmd_ok = False
+                    cmd_err = str(e)
                     log(f"Command Execution Error ({cmd}): {e}", "ERROR")
                 finally:
-                    db.mark_command_done(cid)
+                    try:
+                        db.mark_command_done(cid, ok=cmd_ok, error=cmd_err)
+                    except TypeError:
+                        # backward-compatible fallback
+                        db.mark_command_done(cid)
         except Exception as e:
             print(f"[WARN] Command Monitor Loop: {e}")
         await asyncio.sleep(2)

@@ -73,6 +73,15 @@
     table.trace th, table.trace td { text-align:left; padding:8px; border-bottom:1px solid rgba(0,0,0,.08); vertical-align:top; }
     table.trace th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: rgba(17,24,39,.65); }
     .trace .reason { color: rgba(17,24,39,.75); }
+
+    /* Simple modal for trace details */
+    .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; padding:18px; z-index:9999; }
+    .modal.show { display:flex; }
+    .modal .panel { width:min(980px, 96vw); max-height: 92vh; background:#fff; border-radius:14px; border:1px solid rgba(0,0,0,.15); overflow:hidden; box-shadow:0 12px 30px rgba(0,0,0,.22); }
+    .modal .panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid rgba(0,0,0,.08); }
+    .modal .panel-head .title { font-weight:900; }
+    .modal .panel-body { padding: 0; }
+    .modal .panel-body pre.json { border-radius:0; max-height: calc(92vh - 56px); }
   </style>
 </head>
 <body>
@@ -107,6 +116,19 @@
           <div class="muted" id="comp_hint"></div>
         </div>
         <div class="list" id="components"></div>
+      </div>
+
+      <div class="card col-6">
+        <h3>Queues & counts</h3>
+        <div class="muted">Quick sanity checks: commands, inbox, open trades, DB duplicates.</div>
+        <table class="kv">
+          <tr><td>Commands: PENDING</td><td id="cmd_pending">—</td></tr>
+          <tr><td>Commands: IN_PROGRESS</td><td id="cmd_inprogress">—</td></tr>
+          <tr><td>Commands: FAILED</td><td id="cmd_failed">—</td></tr>
+          <tr><td>Inbox: PENDING</td><td id="inbox_pending">—</td></tr>
+          <tr><td>Open trades (DB)</td><td id="open_trades_count">—</td></tr>
+          <tr><td>DB duplicates</td><td id="db_duplicates">—</td></tr>
+        </table>
       </div>
 
       <div class="card col-12">
@@ -160,6 +182,24 @@
         </div>
         <div class="muted">DB open trades + exchange snapshot (from Execution Monitor).</div>
         <pre class="json" id="positions_pre">{}</pre>
+        <div class="muted" style="margin-top:10px;">Open trades (DB) — protection status</div>
+        <div style="overflow:auto;">
+          <table class="trace" id="open_trades_tbl" style="min-width:980px; margin-top:6px;">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Symbol</th>
+                <th>Market</th>
+                <th>Status</th>
+                <th>FSM</th>
+                <th>Protection</th>
+                <th>Last check</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="muted" id="open_trades_empty" style="display:none; margin-top:8px;">No open trades.</div>
+        </div>
       </div>
 
       <div class="card col-6" id="card_ws">
@@ -184,13 +224,111 @@
         <pre class="json" id="models_pre">{}</pre>
       </div>
 
-      <div class="card col-12">
-        <h3>Strategy decision trace (recent)</h3>
-        <div class="muted">Shows why the bot decided WAIT/NO_TRADE. Default: saves only WAIT/NO_TRADE.</div>
+      <div class="card col-12" id="card_perf">
+        <div class="card-head">
+          <h3>Latency / performance (last 10m)</h3>
+          <div class="card-actions">
+            <button class="btn mini" id="btn_perf_refresh">Refresh</button>
+            <button class="btn mini" data-expand="card_perf">Expand</button>
+          </div>
+        </div>
+        <div class="muted">Reads perf_metrics emitted by the bot (Sprint 6). Shows total latency per symbol.</div>
+        <div id="perf_overall" class="muted" style="margin:8px 0"></div>
+        <div id="perf_table"></div>
+      </div>
+
+      <div class="card col-12" id="card_traces">
+        <div class="card-head">
+          <h3>Strategy decision trace</h3>
+          <div class="card-actions">
+            <button class="btn mini" id="btn_trace_refresh">Refresh</button>
+            <button class="btn mini" data-expand="card_traces">Expand</button>
+          </div>
+        </div>
+        <div class="muted">Use filters to inspect WHY a decision happened (NO_TRADE/WAIT/...).</div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; align-items:center;">
+          <input id="trace_symbol" placeholder="SYMBOL (e.g. BTCUSDT)" style="max-width:180px" />
+          <input id="trace_tf" placeholder="TF (e.g. 5m, 1h)" style="max-width:140px" />
+          <select id="trace_decision" style="max-width:180px">
+            <option value="">DECISION (any)</option>
+            <option value="NO_TRADE">NO_TRADE</option>
+            <option value="WAIT">WAIT</option>
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+          </select>
+          <input id="trace_limit" placeholder="Limit" value="50" style="max-width:100px" />
+          <button class="btn mini" id="btn_trace_apply">Apply</button>
+          <button class="btn mini" id="btn_trace_reset">Reset</button>
+        </div>
+
         <div id="trace_table"></div>
       </div>
 
-      <div class="card col-12" id="card_settings">
+      
+
+      <div class="card col-12" id="card_commands">
+        <div class="card-head">
+          <h3>Command Center</h3>
+          <div class="card-actions">
+            <button class="btn mini" id="btn_cmd_refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="row" style="gap:8px; align-items:flex-end; margin-bottom:10px;">
+            <div style="flex: 1 1 220px;">
+              <label>Command</label>
+              <select id="cmd_select" class="mono" style="width:100%;">
+                <option value="RELOAD_CONFIG">RELOAD_CONFIG</option>
+                <option value="CLOSE_ALL_POSITIONS">CLOSE_ALL_POSITIONS</option>
+                <option value="CLOSE_TRADE">CLOSE_TRADE</option>
+                <option value="EXECUTE_SIGNAL">EXECUTE_SIGNAL</option>
+              </select>
+            </div>
+            <div style="flex: 3 1 420px;">
+              <label>Params (JSON)</label>
+              <input id="cmd_params" class="mono" style="width:100%;" placeholder='{"reason":"manual"}' />
+            </div>
+            <div style="flex: 0 0 auto;">
+              <button class="btn" id="btn_cmd_queue">Queue</button>
+            </div>
+            <div style="flex: 1 1 220px;">
+              <label>Filter status</label>
+              <select id="cmd_filter_status" style="width:100%;">
+                <option value="">ALL</option>
+                <option value="PENDING">PENDING</option>
+                <option value="IN_PROGRESS">IN_PROGRESS</option>
+                <option value="DONE">DONE</option>
+                <option value="FAILED">FAILED</option>
+                <option value="CANCELLED">CANCELLED</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="small" id="cmd_msg"></div>
+
+          <div style="overflow:auto; border:1px solid var(--border); border-radius:12px;">
+            <table class="table" style="min-width:900px;">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Cmd</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                  <th>Source</th>
+                  <th>Claimed</th>
+                  <th>Error</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="commands_tbody"></tbody>
+            </table>
+          </div>
+          <div class="small" style="margin-top:6px; opacity:.75;">Tip: Retry creates a NEW command row and cancels the old one (avoids double processing).</div>
+        </div>
+      </div>
+
+<div class="card col-12" id="card_settings">
         <div class="card-head">
           <h3>Current settings (key subset)</h3>
           <div class="card-actions">
@@ -212,6 +350,19 @@
         <pre class="json" id="all_settings_pre">{}</pre>
       </div>
 
+    </div>
+  </div>
+
+  <!-- Trace detail modal -->
+  <div class="modal" id="trace_modal">
+    <div class="panel">
+      <div class="panel-head">
+        <div class="title" id="trace_modal_title">Trace</div>
+        <button class="btn mini" id="trace_modal_close">Close</button>
+      </div>
+      <div class="panel-body">
+        <pre class="json" id="trace_modal_pre">{}</pre>
+      </div>
     </div>
   </div>
 
@@ -263,6 +414,65 @@
     box.innerHTML = `<ul class="warnings">${arr.map(w => `<li>${escapeHtml(String(w))}</li>`).join("")}</ul>`;
   }
 
+  function fmtUtcFromMs(ms){
+    if(ms === null || ms === undefined || ms === "") return "—";
+    const n = Number(ms);
+    if(!isFinite(n) || n <= 0) return "—";
+    try{ return new Date(n).toISOString().replace('.000Z','Z'); }catch(_){ return "—"; }
+  }
+
+  function renderOpenTradesTable(trades){
+    const tbl = document.getElementById('open_trades_tbl');
+    const empty = document.getElementById('open_trades_empty');
+    if(!tbl) return;
+    const tbody = tbl.querySelector('tbody');
+    if(!tbody) return;
+    const arr = Array.isArray(trades) ? trades : [];
+
+    if(arr.length === 0){
+      tbody.innerHTML = '';
+      tbl.style.display = 'none';
+      if(empty) empty.style.display = 'block';
+      return;
+    }
+
+    tbl.style.display = '';
+    if(empty) empty.style.display = 'none';
+
+    const rows = arr.map(t => {
+      const id = t.id ?? '';
+      const sym = t.symbol ?? '';
+      const mkt = t.market_type ?? '';
+      const st = t.status ?? '';
+      const fsm = t.fsm_state ?? '';
+      const p = t.protection_status ?? '';
+      const last = fmtUtcFromMs(t.protection_last_check_ms);
+
+      let pcls = 'warn';
+      const pUp = String(p || '').toUpperCase();
+      if(['OK','PROTECTED','DONE'].includes(pUp)) pcls = 'ok';
+      else if(['ERROR','MISSING','MISSING_SL','MISSING_TP','UNPROTECTED','ORPHAN_ORDERS'].some(x => pUp.includes(x))) pcls = 'bad';
+      else if(['NO_POSITION','SKIP','UNKNOWN',''].includes(pUp)) pcls = 'warn';
+
+      const pPill = p ? `<span class="pill ${pcls}">${escapeHtml(String(p))}</span>` : `<span class="pill warn">—</span>`;
+
+      return `
+        <tr>
+          <td>${escapeHtml(String(id))}</td>
+          <td><b>${escapeHtml(String(sym))}</b></td>
+          <td>${escapeHtml(String(mkt))}</td>
+          <td>${escapeHtml(String(st))}</td>
+          <td>${escapeHtml(String(fsm))}</td>
+          <td>${pPill}</td>
+          <td>${escapeHtml(String(last))}</td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.innerHTML = rows;
+  }
+
+
   function escapeHtml(s){
     return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
   }
@@ -275,8 +485,12 @@
       host.innerHTML = `<div class="muted">No traces yet. (Wait/NO_TRADE traces appear after the bot evaluates symbols.)</div>`;
       return;
     }
-    const rows = arr.slice(0, 50).map(t => {
-      const created = t.created_at_utc || t.created_utc || t.time_utc || "";
+    // cache in-memory for quick modal view
+    window._trace_cache = {};
+    const rows = arr.map(t => {
+      const id = t.id || t.trace_id || "";
+      if(id) window._trace_cache[id] = t;
+      const created = t.created_at_utc || t.created_utc || t.created_at || t.time_utc || "";
       const symbol = t.symbol || "";
       const interval = t.interval || "";
       const decision = t.decision || "";
@@ -294,6 +508,7 @@
           <td>${escapeHtml(String(minConf))}</td>
           <td>${escapeHtml(String(score))}</td>
           <td class="reason">${escapeHtml(String(reason))}</td>
+          <td><button class="btn mini" data-trace-id="${escapeHtml(String(id))}">View</button></td>
         </tr>
       `;
     }).join("");
@@ -301,17 +516,121 @@
       <table class="trace">
         <thead>
           <tr>
-            <th>UTC</th><th>Symbol</th><th>TF</th><th>Decision</th><th>Conf</th><th>Min</th><th>Score</th><th>Reason</th>
+            <th>UTC</th><th>Symbol</th><th>TF</th><th>Decision</th><th>Conf</th><th>Min</th><th>Score</th><th>Reason</th><th>Details</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
     `;
+
+    host.querySelectorAll("[data-trace-id]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-trace-id");
+        if(!id) return;
+        let item = (window._trace_cache && window._trace_cache[id]) ? window._trace_cache[id] : null;
+        // If trace is missing, fetch full record
+        if(!item || !item.trace){
+          try{
+            const r = await fetch(`/api/decision_traces/${encodeURIComponent(id)}`, {cache:"no-store"});
+            const j = await r.json();
+            if(j && j.ok && j.item) item = j.item;
+          }catch(_){ /* ignore */ }
+        }
+        const title = `${item?.symbol || ''} ${item?.interval || ''} ${item?.decision || ''}`.trim() || `Trace #${id}`;
+        openTraceModal(title, item || {id});
+      });
+    });
   }
 
   let _timer = null;
 
-  async function loadDoctor(){
+  
+
+  // -----------------------------
+  // Sprint 7: Command Center
+  // -----------------------------
+  let _cmd_last_fetch = 0;
+
+  function _pillStatus(st){
+    const s = String(st || '').toUpperCase();
+    if(s === 'PENDING') return '<span class="pill warn">PENDING</span>';
+    if(s === 'IN_PROGRESS') return '<span class="pill warn">IN_PROGRESS</span>';
+    if(s === 'DONE') return '<span class="pill ok">DONE</span>';
+    if(s === 'FAILED') return '<span class="pill bad">FAILED</span>';
+    if(s === 'CANCELLED') return '<span class="pill">CANCELLED</span>';
+    return `<span class="pill">${esc(s || '-')}</span>`;
+  }
+
+  function renderCommands(items){
+    const tb = document.getElementById('commands_tbody');
+    if(!tb) return;
+    const rows = (items || []).map(it => {
+      const id = it.id ?? '';
+      const cmd = esc(it.cmd || '-');
+      const st = _pillStatus(it.status || '');
+      const created = esc(it.created_at || (it.created_at_ms ? new Date(Number(it.created_at_ms)).toISOString() : '-'));
+      const src = esc(it.source || '-');
+      const claimed = esc(it.claimed_by || '-');
+      const err = esc(it.last_error || '');
+      const canCancel = String(it.status || '').toUpperCase() === 'PENDING';
+      const btnCancel = `<button class="btn mini" data-cmd-cancel="${id}" ${canCancel ? '' : 'disabled'}>Cancel</button>`;
+      const btnRetry = `<button class="btn mini" data-cmd-retry="${id}">Retry</button>`;
+      return `<tr>
+        <td class="mono">${id}</td>
+        <td class="mono">${cmd}</td>
+        <td>${st}</td>
+        <td class="mono">${created}</td>
+        <td class="mono">${src}</td>
+        <td class="mono">${claimed}</td>
+        <td class="mono" style="max-width:280px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${err}</td>
+        <td>${btnCancel} ${btnRetry}</td>
+      </tr>`;
+    }).join('');
+    tb.innerHTML = rows || '<tr><td colspan="8" class="small">No commands</td></tr>';
+  }
+
+  async function loadCommands(force=false){
+    const now = Date.now();
+    if(!force && (now - _cmd_last_fetch) < 2500) return;
+    _cmd_last_fetch = now;
+
+    const st = document.getElementById('cmd_filter_status')?.value || '';
+    const q = st ? `?limit=40&status=${encodeURIComponent(st)}` : '?limit=40';
+    try{
+      const res = await fetchJson('/api/commands' + q);
+      if(res && res.ok){
+        renderCommands(res.items || []);
+      }
+    }catch(e){
+      // ignore (auth, etc.)
+    }
+  }
+
+  async function queueCommand(){
+    const cmd = document.getElementById('cmd_select')?.value || '';
+    const raw = document.getElementById('cmd_params')?.value || '';
+    let params = {};
+    if(raw && String(raw).trim()){
+      try{ params = JSON.parse(raw); }
+      catch(_){ params = { raw }; }
+    }
+    const msg = document.getElementById('cmd_msg');
+    if(msg) msg.textContent = '';
+    try{
+      const res = await fetchJson('/api/commands/queue', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ cmd, params })
+      });
+      if(msg) msg.innerHTML = res.ok ? `<span class="pill ok">QUEUED</span> command_id=<span class="mono">${res.command_id||0}</span>` : `<span class="pill bad">FAILED</span> <span class="mono">${esc(res.message||'')}</span>`;
+      await loadCommands(true);
+      await loadDoctor();
+    }catch(e){
+      if(msg) msg.innerHTML = `<span class="pill bad">FAILED</span> <span class="mono">${esc(String(e))}</span>`;
+    }
+  }
+
+async function loadDoctor(){
     const refreshLabel = document.getElementById("last_refresh");
     if(refreshLabel) refreshLabel.textContent = "Refreshing…";
     try{
@@ -333,10 +652,29 @@
 
       const env = data.env || {};
       const envBits = [];
-      if(env.use_testnet !== undefined) envBits.push(`USE_TESTNET=${env.use_testnet}`);
-      if(env.paper_trading !== undefined) envBits.push(`PAPER_TRADING=${env.paper_trading}`);
-      if(env.binance_key_present !== undefined) envBits.push(`API_KEY=${env.binance_key_present ? "SET" : "MISSING"}`);
+      if(env.USE_TESTNET !== undefined) envBits.push(`USE_TESTNET=${env.USE_TESTNET}`);
+      if(env.PAPER_TRADING !== undefined) envBits.push(`PAPER_TRADING=${env.PAPER_TRADING}`);
+      if(env.BINANCE_API_KEY_PRESENT !== undefined) envBits.push(`API_KEY=${String(env.BINANCE_API_KEY_PRESENT) === '1' ? 'SET' : 'MISSING'}`);
       setText("env_summary", envBits.length ? envBits.join(" · ") : "—");
+
+      // queues & counts
+      const counts = data.counts || {};
+      const cmdQ = counts.commands || {};
+      const inboxQ = counts.inbox || {};
+      setText("cmd_pending", (cmdQ.PENDING !== undefined) ? cmdQ.PENDING : (cmdQ.pending !== undefined ? cmdQ.pending : (cmdQ.TOTAL !== undefined ? cmdQ.TOTAL : 0)));
+      setText("cmd_inprogress", cmdQ.IN_PROGRESS !== undefined ? cmdQ.IN_PROGRESS : 0);
+      setText("cmd_failed", cmdQ.FAILED !== undefined ? cmdQ.FAILED : 0);
+      setText("inbox_pending", inboxQ.PENDING !== undefined ? inboxQ.PENDING : 0);
+      setText("open_trades_count", counts.open_trades !== undefined ? counts.open_trades : "—");
+
+      // DB duplicates (if multiple bot_data.db exist)
+      const pin = (db && db.pin) ? db.pin : {};
+      const dups = (pin && pin.duplicates) ? pin.duplicates : [];
+      if(dups && dups.length){
+        setText("db_duplicates", `${dups.length} → ${dups.join(' | ')}`);
+      }else{
+        setText("db_duplicates", '0');
+      }
 
       // components list
       const compHost = document.getElementById("components");
@@ -367,6 +705,7 @@
       // big blocks
       setJSON("protection_pre", data.protection_audit || {});
       setJSON("positions_pre", data.positions || {});
+      try{ renderOpenTradesTable((data.positions && data.positions.db_open_trades) ? data.positions.db_open_trades : []); }catch(_){ }
       setJSON("ws_pre", data.ws || {});
       setJSON("models_pre", data.models || {});
 
@@ -386,10 +725,99 @@
       }
 
       if(refreshLabel) refreshLabel.textContent = `Last refresh: ${new Date().toLocaleTimeString()}`;
+      try{ await loadCommands(false); }catch(_){ }
     }catch(e){
       document.getElementById("overall").outerHTML = pill(false, "ERROR");
       renderWarnings([String(e)]);
       if(refreshLabel) refreshLabel.textContent = "";
+    }
+  }
+
+  // ---- Sprint 6: Trace modal + filters ----
+  function openTraceModal(title, obj){
+    const modal = document.getElementById("trace_modal");
+    const ttl = document.getElementById("trace_modal_title");
+    const pre = document.getElementById("trace_modal_pre");
+    if(ttl) ttl.textContent = title || "Trace";
+    if(pre) pre.textContent = JSON.stringify(obj || {}, null, 2);
+    if(modal) modal.classList.add("show");
+  }
+
+  function closeTraceModal(){
+    const modal = document.getElementById("trace_modal");
+    if(modal) modal.classList.remove("show");
+  }
+
+  async function loadTracesFromUI(){
+    const sym = (document.getElementById("trace_symbol")?.value || "").trim();
+    const tf = (document.getElementById("trace_tf")?.value || "").trim();
+    const dec = (document.getElementById("trace_decision")?.value || "").trim();
+    const limitRaw = (document.getElementById("trace_limit")?.value || "50").trim();
+    const limit = parseInt(limitRaw || "50", 10) || 50;
+
+    const parts = [];
+    if(sym) parts.push(`symbol=${encodeURIComponent(sym)}`);
+    if(tf) parts.push(`interval=${encodeURIComponent(tf)}`);
+    if(dec) parts.push(`decision=${encodeURIComponent(dec)}`);
+    parts.push(`limit=${encodeURIComponent(String(limit))}`);
+    const url = `/api/decision_traces?${parts.join("&")}`;
+    try{
+      const r = await fetch(url, {cache:"no-store"});
+      const j = await r.json();
+      if(j && j.ok){
+        renderTraces(j.items || []);
+      }
+    }catch(_){ /* ignore */ }
+  }
+
+  // ---- Sprint 6: Performance summary ----
+  function renderPerf(data){
+    const overall = document.getElementById("perf_overall");
+    const table = document.getElementById("perf_table");
+    if(!overall || !table) return;
+
+    if(!data || !data.ok){
+      overall.textContent = "Perf summary not available.";
+      table.innerHTML = "";
+      return;
+    }
+
+    const o = data.overall || {};
+    const s = data.stages || {};
+    overall.textContent = `window=${data.window_sec}s · samples=${o.count || 0} · total p95=${(o.p95 ?? "—")}ms · fetch p95=${(s.fetch_ms?.p95 ?? "—")}ms · score p95=${(s.score_ms?.p95 ?? "—")}ms · model p95=${(s.model_ms?.p95 ?? "—")}ms`;
+
+    const rows = (data.top_symbols || []).map(x => {
+      return `<tr>
+        <td><b>${escapeHtml(String(x.symbol || ""))}</b></td>
+        <td>${escapeHtml(String(x.count ?? ""))}</td>
+        <td>${escapeHtml(String(x.p95 ?? ""))}</td>
+        <td>${escapeHtml(String(x.avg ?? ""))}</td>
+        <td>${escapeHtml(String(x.p50 ?? ""))}</td>
+      </tr>`;
+    }).join("");
+
+    if(!rows){
+      table.innerHTML = `<div class="muted">No perf samples yet. (Wait until the bot runs Sprint 6 instrumentation.)</div>`;
+      return;
+    }
+
+    table.innerHTML = `
+      <table class="trace">
+        <thead>
+          <tr><th>Symbol</th><th>N</th><th>Total p95 (ms)</th><th>Avg (ms)</th><th>p50 (ms)</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  async function loadPerf(){
+    try{
+      const r = await fetch("/api/perf/summary?window_sec=600", {cache:"no-store"});
+      const j = await r.json();
+      renderPerf(j);
+    }catch(_){
+      renderPerf({ok:false});
     }
   }
 
@@ -445,7 +873,8 @@
     });
   }
 
-  // Copy / expand handlers
+
+  // Copy / expand handlers (+ command center)
   document.addEventListener("click", async (e) => {
     const copyId = e.target?.getAttribute?.("data-copy");
     if(copyId){
@@ -455,9 +884,11 @@
           await navigator.clipboard.writeText(el.textContent || "");
           e.target.textContent = "Copied";
           setTimeout(() => e.target.textContent = "Copy", 800);
-        }catch(_){}
+        }catch(_){ }
       }
+      return;
     }
+
     const expId = e.target?.getAttribute?.("data-expand");
     if(expId){
       const card = document.getElementById(expId);
@@ -465,11 +896,68 @@
         card.classList.toggle("expanded");
         e.target.textContent = card.classList.contains("expanded") ? "Collapse" : "Expand";
       }
+      return;
+    }
+
+    // Command Center actions
+    const cancelId = e.target?.getAttribute?.("data-cmd-cancel");
+    if(cancelId){
+      try{ await fetchJson(`/api/commands/${cancelId}/cancel`, { method: 'POST' }); }catch(_){ }
+      await loadCommands(true);
+      await loadDoctor();
+      return;
+    }
+
+    const retryId = e.target?.getAttribute?.("data-cmd-retry");
+    if(retryId){
+      try{ await fetchJson(`/api/commands/${retryId}/retry`, { method: 'POST' }); }catch(_){ }
+      await loadCommands(true);
+      await loadDoctor();
+      return;
     }
   });
 
   // initial
+  // Wire sprint6 controls
+  const btnTraceApply = document.getElementById("btn_trace_apply");
+  if(btnTraceApply) btnTraceApply.addEventListener("click", loadTracesFromUI);
+  const btnTraceReset = document.getElementById("btn_trace_reset");
+  if(btnTraceReset) btnTraceReset.addEventListener("click", () => {
+    try{ document.getElementById("trace_symbol").value = ""; }catch(_){ }
+    try{ document.getElementById("trace_tf").value = ""; }catch(_){ }
+    try{ document.getElementById("trace_decision").value = ""; }catch(_){ }
+    try{ document.getElementById("trace_limit").value = "50"; }catch(_){ }
+    loadTracesFromUI();
+  });
+  const btnTraceRefresh = document.getElementById("btn_trace_refresh");
+  if(btnTraceRefresh) btnTraceRefresh.addEventListener("click", loadTracesFromUI);
+
+  const btnPerfRefresh = document.getElementById("btn_perf_refresh");
+  if(btnPerfRefresh) btnPerfRefresh.addEventListener("click", loadPerf);
+
+
+  const btnCmdRefresh = document.getElementById("btn_cmd_refresh");
+  if(btnCmdRefresh) btnCmdRefresh.addEventListener("click", () => loadCommands(true));
+
+  const btnCmdQueue = document.getElementById("btn_cmd_queue");
+  if(btnCmdQueue) btnCmdQueue.addEventListener("click", queueCommand);
+
+  const cmdFilter = document.getElementById("cmd_filter_status");
+  if(cmdFilter) cmdFilter.addEventListener("change", () => loadCommands(true));
+
+
+  const btnModalClose = document.getElementById("trace_modal_close");
+  if(btnModalClose) btnModalClose.addEventListener("click", closeTraceModal);
+  const modal = document.getElementById("trace_modal");
+  if(modal){
+    modal.addEventListener("click", (e) => {
+      if(e.target === modal) closeTraceModal();
+    });
+  }
+
   loadDoctor();
+  loadPerf();
+  loadCommands(true);
   setAuto(true);
 </script>
 </body>

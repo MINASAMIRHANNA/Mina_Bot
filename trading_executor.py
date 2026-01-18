@@ -202,7 +202,7 @@ def _is_paper() -> bool:
 
     Safety:
     - PAPER_TRADING=True => always paper (no live orders).
-    - Otherwise, DB setting `mode` controls LIVE vs TEST/PAPER.
+    - Otherwise, DB setting `mode` controls whether orders are executed (LIVE/TEST) or disabled (PAPER).
     """
     try:
         if bool(getattr(cfg, "PAPER_TRADING", False)):
@@ -211,7 +211,8 @@ def _is_paper() -> bool:
         return True
     try:
         mode = _get_mode_cached()
-        return mode != "LIVE"
+        # Sprint 9: TEST uses testnet but still executes real orders; only PAPER disables execution
+        return mode == "PAPER"
     except Exception:
         return True
 
@@ -226,7 +227,7 @@ def init_client(force: bool = False) -> Optional[Client]:
     if client is not None and not force:
         return client
 
-    # Don't init network client in paper/TEST mode
+    # Don't init network client in PAPER mode
     if _is_paper():
         if force:
             # allow force re-init in case mode switched to LIVE; re-check below
@@ -241,7 +242,7 @@ def init_client(force: bool = False) -> Optional[Client]:
 
     if not api_key or not api_secret:
         if not _is_paper():
-            print("[CRITICAL] Missing BINANCE_API_KEY / BINANCE_API_SECRET for LIVE trading.")
+            print("[CRITICAL] Missing BINANCE_API_KEY / BINANCE_API_SECRET for execution mode (LIVE/TEST).")
             client = None
             return None
 

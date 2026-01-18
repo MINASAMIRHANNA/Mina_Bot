@@ -285,40 +285,70 @@ class RiskSupervisor:
             return
         self.shutdown_triggered = True
 
-        # Mark kill switch + safer mode
+        # Determine if we are truly LIVE (otherwise avoid forcing kill_switch in TEST/PAPER mode)
         try:
-            self.db.set_setting("kill_switch", "1")
+            mode = str(self._get_setting('mode', 'TEST') or 'TEST').strip().upper()
+        except Exception:
+            mode = 'TEST'
+        try:
+            paper_flag = bool(getattr(cfg, 'PAPER_TRADING', False))
+        except Exception:
+            paper_flag = True
+        try:
+            enable_live = bool(getattr(cfg, 'ENABLE_LIVE_TRADING', False))
+        except Exception:
+            enable_live = False
+
+        is_live = (mode == 'LIVE') and enable_live and (not paper_flag)
+
+        # Always record reason
+        try:
+            self.db.set_setting('kill_switch_reason', str(reason))
         except Exception:
             pass
 
-        try:
-            self.db.set_setting("mode", "TEST")
-        except Exception:
-            pass
+        if is_live:
+            # Mark kill switch + safer mode
+            try:
+                self.db.set_setting('kill_switch', '1')
+            except Exception:
+                pass
 
-        # Log + notify
+            try:
+                self.db.set_setting('mode', 'TEST')
+            except Exception:
+                pass
+
+        action_txt = (
+            'Action: kill_switch=ON, mode=TEST, closing positions.'
+            if is_live else
+            'Action: TEST/PAPER mode detected; no forced shutdown (tune max_daily_loss_usd / max_drawdown_pct as needed).'
+        )
         msg = (
             "🚨 **RISK STOP** 🚨\n"
             f"Reason: {reason}\n"
-            "Action: kill_switch=ON, mode=TEST, closing positions."
+            f"{action_txt}"
         )
 
         try:
-            self.db.log(msg, level="ERROR")
+            self.db.log(msg, level='ERROR' if is_live else 'WARN')
         except Exception:
             pass
 
         if details:
             try:
-                self.db.log(f"RISK DETAILS: {details}", level="ERROR")
+                self.db.log(f"RISK DETAILS: {details}", level='ERROR' if is_live else 'WARN')
             except Exception:
                 pass
 
-        self._send_telegram(msg)
+        # Telegram only for LIVE to avoid spam during backtests/paper tests
+        if is_live:
+            self._send_telegram(msg)
 
-        # Close positions (best effort)
-        self._enqueue_close_all(reason)
-        self._attempt_close_positions_direct()
+        # Close positions (best effort) only in LIVE mode
+        if is_live:
+            self._enqueue_close_all(reason)
+            self._attempt_close_positions_direct()
 
         print(msg)
 

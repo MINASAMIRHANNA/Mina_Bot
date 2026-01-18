@@ -34,9 +34,14 @@ def get_ws_status():
 # ==========================================================
 
 def _futures_ws_base(use_testnet: bool) -> str:
+    # Prefer explicit cfg value, but sanitize known-bad testnet default.
     v = str(getattr(cfg, "BINANCE_FUTURES_WS_BASE", "") or "")
     if v.strip():
-        return v.strip().rstrip("/")
+        vv = v.strip().rstrip("/")
+        # Some older configs used an invalid testnet WS host. Fix it transparently.
+        if use_testnet and ("stream.binancefuture.com" in vv):
+            return "wss://fstream.binancefuture.com"
+        return vv
     return "wss://fstream.binancefuture.com" if use_testnet else "wss://fstream.binance.com"
 
 def _configure_async_futures_endpoints(client: AsyncClient, use_testnet: bool) -> None:
@@ -203,8 +208,28 @@ async def maintain_socket_connection(id, streams, callback, market_type="futures
                         continue
 
                     # bounded background callback
+                    # Backpressure: avoid unbounded task buildup when callbacks are slower than WS events
+                    max_pending = int(getattr(cfg, "WS_MAX_PENDING_TASKS", 2000) or 2000)
+                    if max_pending > 0 and len(_TASKS) >= max_pending:
+                        try:
+                            _WS_STATE["dropped_callbacks"] = int(_WS_STATE.get("dropped_callbacks") or 0) + 1
+                            _WS_STATE["callbacks_pending"] = int(len(_TASKS))
+                            st = _WS_STATE.get("sockets", {}).get(str(id), {})
+                            st["callbacks_pending"] = int(len(_TASKS))
+                            _WS_STATE["sockets"][str(id)] = st
+                        except Exception:
+                            pass
+                        continue
+
                     t = asyncio.create_task(_run_callback(callback, symbol, interval, k, market_type))
                     _TASKS.add(t)
+                    try:
+                        _WS_STATE["callbacks_pending"] = int(len(_TASKS))
+                        st = _WS_STATE.get("sockets", {}).get(str(id), {})
+                        st["callbacks_pending"] = int(len(_TASKS))
+                        _WS_STATE["sockets"][str(id)] = st
+                    except Exception:
+                        pass
                     t.add_done_callback(lambda _t: _TASKS.discard(_t))
 
         except Exception as e:
