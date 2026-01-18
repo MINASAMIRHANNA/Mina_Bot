@@ -250,42 +250,45 @@ class RiskManager:
         return True
 
 
-        def _check_daily_loss(self) -> bool:
-            """Stop trading if realized PnL for today breaches max_daily_loss."""
-            max_loss = _to_float(self._s("max_daily_loss"), 0.0)
-            if max_loss <= 0:
-                return True
-            # Prefer DB helper if present
-            try:
-                day = _utc_now().strftime("%Y-%m-%d")
-                if hasattr(self.db, "get_daily_pnl"):
-                    pnl = _to_float(self.db.get_daily_pnl(day), 0.0)
-                else:
-                    pnl = 0.0
-            except Exception:
+    def _check_daily_loss(self) -> bool:
+        """Stop trading if realized PnL for today breaches max_daily_loss."""
+        max_loss = _to_float(self._s("max_daily_loss"), 0.0)
+        if max_loss <= 0:
+            return True
+
+        # Prefer DB helper if present
+        try:
+            day = _utc_now().strftime("%Y-%m-%d")
+            if hasattr(self.db, "get_daily_pnl"):
+                pnl = _to_float(self.db.get_daily_pnl(day), 0.0)
+            else:
                 pnl = 0.0
+        except Exception:
+            pnl = 0.0
 
-            if pnl <= -abs(max_loss):
-                self._log(f"⛔ Daily loss limit hit: pnl={pnl:.2f} <= -{abs(max_loss):.2f}")
-                return False
-            return True
+        if pnl <= -abs(max_loss):
+            self._log(f"⛔ Daily loss limit hit: pnl={pnl:.2f} <= -{abs(max_loss):.2f}")
+            return False
+        return True
 
-        def _check_consecutive_losses(self) -> bool:
-            """Stop trading if last N closed trades are losses."""
-            max_losses = _to_int(self._s("max_consecutive_losses"), 0)
-            if max_losses <= 0:
-                return True
-            try:
-                losses = []
-                if hasattr(self.db, "get_recent_losses"):
-                    losses = list(self.db.get_recent_losses(limit=max_losses) or [])
-                # if DB doesn't implement, fail open
-            except Exception:
-                losses = []
-            if len(losses) >= max_losses:
-                self._log(f"⛔ Consecutive losses ({max_losses}) — trading paused")
-                return False
+    def _check_consecutive_losses(self) -> bool:
+        """Stop trading if last N closed trades are losses."""
+        max_losses = _to_int(self._s("max_consecutive_losses"), 0)
+        if max_losses <= 0:
             return True
+        try:
+            losses = []
+            if hasattr(self.db, "get_recent_losses"):
+                losses = list(self.db.get_recent_losses(limit=max_losses) or [])
+        except Exception:
+            losses = []
+
+        if len(losses) >= max_losses:
+            self._log(f"⛔ Consecutive losses ({max_losses}) — trading paused")
+            return False
+        return True
+
+
     def _check_symbol_cooldown(self, symbol: str) -> bool:
         """Block repeated entries for same symbol within a cooldown window."""
         mins = _to_int(self._s("cooldown_minutes"), 3)
